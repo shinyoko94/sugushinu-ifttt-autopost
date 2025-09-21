@@ -1,7 +1,13 @@
-import re, io, os, json, hashlib, pathlib, datetime as dt, urllib.parse, subprocess
+import re, io, os, json, hashlib, pathlib, datetime as dt, urllib.parse, subprocess, sys
 import requests
 from bs4 import BeautifulSoup
 import matplotlib.pyplot as plt
+from matplotlib import rcParams
+
+# ===== 日本語フォントを明示（Actionsで fonts-noto-cjk を入れている想定）=====
+rcParams['font.sans-serif'] = ['Noto Sans CJK JP', 'Noto Sans CJK JP Regular', 'DejaVu Sans']
+rcParams['axes.unicode_minus'] = False  # マイナス記号の豆腐防止
+# ============================================================================
 
 VOTE_URL = "https://sugushinu-anime.jp/vote/"
 TOP_N = int(os.getenv("TOP_N", "10"))
@@ -26,13 +32,17 @@ def render_image(top_items, caption):
     titles = [f"{i+1}. {t[0]}" for i, t in enumerate(top_items)]
     votes  = [t[1] for t in top_items]
     y = list(range(len(titles)))[::-1]
-    fig, ax = plt.subplots(figsize=(9, 6))
+    fig, ax = plt.subplots(figsize=(10, 7), dpi=220)  # ちょい大きめ＆高解像
     ax.barh(y, votes)
-    ax.set_yticks(y); ax.set_yticklabels(titles, fontsize=9)
-    ax.set_xlabel("Votes"); ax.set_title(caption)
+    ax.set_yticks(y)
+    ax.set_yticklabels(titles, fontsize=11)
+    ax.set_xlabel("Votes", fontsize=11)
+    ax.set_title(caption, fontsize=14)
     plt.tight_layout()
-    buf = io.BytesIO(); fig.savefig(buf, format="png", dpi=200)
-    plt.close(fig); buf.seek(0); return buf
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=220)
+    plt.close(fig); buf.seek(0)
+    return buf
 
 def git_commit(filepath: pathlib.Path, msg: str):
     subprocess.run(["git", "config", "user.name", "github-actions[bot]"], check=True)
@@ -41,24 +51,53 @@ def git_commit(filepath: pathlib.Path, msg: str):
     subprocess.run(["git", "commit", "-m", msg], check=True)
     subprocess.run(["git", "push"], check=True)
 
+def post_ifttt(text: str, img_url: str):
+    key = os.getenv("IFTTT_KEY")
+    event = os.getenv("IFTTT_EVENT")
+    if not (key and event):
+        print("IFTTT_KEY/IFTTT_EVENT 未設定なので送信スキップ", file=sys.stderr)
+        return False
+    url = f"https://maker.ifttt.com/trigger/{event}/with/key/{key}"
+    r = requests.post(url, json={"value1": text, "value2": img_url}, timeout=30)
+    print("IFTTT status:", r.status_code, r.text[:200])
+    return r.ok
+
 def main():
     jst = dt.datetime.now(dt.timezone(dt.timedelta(hours=9)))
-    stamp_full = jst.strftime("%Y/%m/%d %H:%M"); stamp_day = jst.strftime("%Y-%m-%d")
+    stamp_full = jst.strftime("%Y/%m/%d %H:%M")
+    stamp_day  = jst.strftime("%Y-%m-%d")
     label_ja = "（朝の部）" if RUN_LABEL=="AM" else ("（夜の部）" if RUN_LABEL=="PM" else "")
-    html = fetch_html(VOTE_URL); items = parse_votes(html)
+
+    html = fetch_html(VOTE_URL)
+    items = parse_votes(html)
     if not items: raise SystemExit("票データが取れませんでした。")
+
     top = pick_top(items, TOP_N)
     caption = f"吸死アニメ人気エピソード投票 上位{len(top)}（{stamp_full} JST）{label_ja}"
     img = render_image(top, caption)
+
     PUBLIC_DIR.mkdir(exist_ok=True)
     fname = f"ranking_{stamp_day}_{RUN_LABEL or 'RUN'}.png"
-    out = PUBLIC_DIR / fname
+    out   = PUBLIC_DIR / fname
     with open(out, "wb") as f: f.write(img.read())
-    repo = os.getenv("GITHUB_REPOSITORY"); ref = os.getenv("GITHUB_REF_NAME", "main")
+
+    # 公開URL（Publicリポ想定）
+    repo = os.getenv("GITHUB_REPOSITORY")
+    ref  = os.getenv("GITHUB_REF_NAME", "main")
     img_url = f"https://raw.githubusercontent.com/{repo}/{ref}/public/{urllib.parse.quote(fname)}"
+
+    # コミット（→ raw URLで即アクセス可能）
     git_commit(out, f"Add {fname}")
+
+    # 本文
     body = f"【自動集計】吸死アニメ投票 上位{len(top)} {label_ja}\n{stamp_day} JST 時点\n#吸血鬼すぐ死ぬ #吸死アニメ"
-    print(f"IFTTT_TEXT::{body}"); print(f"IFTTT_IMG::{img_url}")
+
+    # IFTTTに直接送る
+    post_ifttt(body, img_url)
+
+    # ログ（デバッグ用）
+    print(f"IFTTT_TEXT::{body}")
+    print(f"IFTTT_IMG::{img_url}")
 
 if __name__ == "__main__":
     main()
