@@ -93,7 +93,7 @@ def draw_panel(ax, items, color, caption, fixed_xlim=800, show_xlabel=False):
     bars = ax.barh(y, votes, color=color)
 
     ax.set_yticks(y)
-    ax.set_yticklabels(titles, fontsize=11)     # ←安定版サイズ
+    ax.set_yticklabels(titles, fontsize=11)     # 安定版サイズ
     if show_xlabel:
         ax.set_xlabel("投票数", fontsize=11)
     ax.set_title(caption, fontsize=14)
@@ -136,7 +136,6 @@ def main():
     # ---- 同一キャンバスに2サブプロット、x軸共有で完全に揃える ----
     fixed_xlim = 800
     fig, axes = plt.subplots(nrows=2, ncols=1, figsize=(10, 12), dpi=220, sharex=True)
-    # レイアウトは手動で統一（tight_layoutは使わない）
     fig.subplots_adjust(left=0.33, right=0.98, top=0.96, bottom=0.08, hspace=0.28)
 
     draw_panel(axes[0], top_s1, 'tab:orange', cap_s1, fixed_xlim=fixed_xlim, show_xlabel=False)
@@ -159,15 +158,18 @@ def main():
     subprocess.run(["git", "commit", "-m", f"Add {fname}"], check=True)
     subprocess.run(["git", "push"], check=True)
 
-    # IFTTT 投稿
-    key   = os.getenv("IFTTT_KEY")
-    event = os.getenv("IFTTT_EVENT")
+    # 🐦ツイート文面（見出しの直後に空行）
     body = (
         f"🗳️エピソード投票中間結果発表（{month_day} {time_label}）🗳️\n"
+        f"\n"
         f"{CAMPAIGN_PERIOD}\n"
         f"投票はこちらから（1日1回）→ https://sugushinu-anime.jp/vote/\n\n"
         f"#吸血鬼すぐ死ぬ\n#吸血鬼すぐ死ぬ２\n#応援上映エッヒョッヒョ"
     )
+
+    # IFTTT 投稿
+    key   = os.getenv("IFTTT_KEY")
+    event = os.getenv("IFTTT_EVENT")
     if key and event:
         url = f"https://maker.ifttt.com/trigger/{event}/with/key/{key}"
         r = requests.post(url, json={"value1": body, "value2": img_url}, timeout=30)
