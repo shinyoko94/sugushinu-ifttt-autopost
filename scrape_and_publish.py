@@ -1,20 +1,19 @@
-import re, io, os, json, pathlib, datetime as dt, urllib.parse, subprocess, sys
+import re, io, os, json, pathlib, datetime as dt, urllib.parse, subprocess, sys, textwrap
 import requests
 from bs4 import BeautifulSoup
 import matplotlib.pyplot as plt
 from matplotlib import rcParams
-from PIL import Image  # ← 画像結合用
+from PIL import Image  # 画像結合用
 
 # ===== 日本語フォント（豆腐対策）=====
-# Actions 側で fonts-noto-cjk を入れてる想定（post.yml に apt-get あり）
 rcParams['font.sans-serif'] = ['Noto Sans CJK JP', 'Noto Sans CJK JP Regular', 'DejaVu Sans']
 rcParams['axes.unicode_minus'] = False
 # ======================================
 
 VOTE_URL   = "https://sugushinu-anime.jp/vote/"
-TOP_N      = int(os.getenv("TOP_N", "5"))        # ← デフォは Top5
-RUN_LABEL  = os.getenv("RUN_LABEL", "")         # "AM" / "PM"（手動実行は空）
-PUBLIC_DIR = pathlib.Path("public")             # 画像の出力先（リポ直下）
+TOP_N      = int(os.getenv("TOP_N", "5"))        # Top5
+RUN_LABEL  = os.getenv("RUN_LABEL", "")         # "AM"/"PM"（手動実行は空）
+PUBLIC_DIR = pathlib.Path("public")
 
 TITLE_PREFIXES = ["吸血鬼すぐ死ぬ", "吸血鬼すぐ死ぬ２"]  # 1期 / 2期 見出し
 
@@ -24,9 +23,7 @@ def fetch_html(url: str) -> str:
     return r.text
 
 def parse_votes_by_season(html: str):
-    """
-    期ごとに『タイトル』 数字を抽出して {"S1":[(title,vote),...], "S2":[...]} を返す
-    """
+    """期ごとに『タイトル』 数字を抽出して {"S1":[(title,vote),...], "S2":[...]} を返す"""
     soup = BeautifulSoup(html, "lxml")
     text = soup.get_text("\n", strip=True)
 
@@ -53,34 +50,36 @@ def parse_votes_by_season(html: str):
     return out
 
 def pick_top(items, n=5):
-    # 票数降順、同数はタイトル昇順
     return sorted(items, key=lambda x: (-x[1], x[0]))[:n]
 
-def _short(s: str, n: int = 34) -> str:
-    """ラベルが長いときに末尾を省略"""
-    return s if len(s) <= n else s[: n - 1] + "…"
+def _wrap(s: str, width: int = 18, max_lines: int = 2) -> str:
+    """タイトルをいい感じに折り返し（最大2行）"""
+    lines = textwrap.wrap(s, width=width)
+    lines = lines[:max_lines]
+    if len(lines) == max_lines and len(s) > sum(len(x) for x in lines):
+        lines[-1] = lines[-1].rstrip() + "…"
+    return "\n".join(lines)
 
-def render_image(top_items, caption):
+def render_image(top_items, caption, bar_color=None):
     """
-    横棒グラフを生成。各バーの右側に票数（3桁区切り）を描画。
+    横棒グラフ。各バーの右に票数（3桁区切り）。タイトルは改行で折り返し。
+    bar_color: 例 'tab:orange' / '#7e57c2' など
     """
-    titles = [f"{i+1}. {_short(t[0])}" for i, t in enumerate(top_items)]
+    titles = [f"{i+1}. {_wrap(t[0])}" for i, t in enumerate(top_items)]
     votes  = [int(t[1]) for t in top_items]
     y = list(range(len(titles)))[::-1]
 
     fig, ax = plt.subplots(figsize=(10, 7), dpi=220)
-    bars = ax.barh(y, votes)  # 色は指定しない
+    bars = ax.barh(y, votes, color=bar_color)  # ← 色指定OK（GitHub Actionsで使う用）
     ax.set_yticks(y)
     ax.set_yticklabels(titles, fontsize=11)
     ax.set_xlabel("Votes", fontsize=11)
     ax.set_title(caption, fontsize=14)
     ax.xaxis.grid(True, linestyle=":", alpha=0.3)
 
-    # 票数ラベルのために右側に余白
     vmax = max(votes) if votes else 0
-    ax.set_xlim(0, vmax * 1.15 if vmax > 0 else 1)
+    ax.set_xlim(0, vmax * 1.18 if vmax > 0 else 1)
 
-    # 各バーの右側に票数を描く（3桁区切り）
     for bar, v in zip(bars, votes):
         ax.text(
             bar.get_width() + (vmax * 0.02 if vmax > 0 else 0.02),
@@ -89,6 +88,8 @@ def render_image(top_items, caption):
             va="center", ha="left", fontsize=11
         )
 
+    # 左余白を少し広げて折り返し分を確保
+    plt.subplots_adjust(left=0.33)
     plt.tight_layout()
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=220)
@@ -111,7 +112,6 @@ def stitch_vertical(img1_bytes: io.BytesIO, img2_bytes: io.BytesIO) -> io.BytesI
     return out
 
 def git_commit(filepath: pathlib.Path, msg: str):
-    """Actions 内から画像をコミット & push"""
     subprocess.run(["git", "config", "user.name", "github-actions[bot]"], check=True)
     subprocess.run(["git", "config", "user.email", "github-actions[bot]@users.noreply.github.com"], check=True)
     subprocess.run(["git", "add", str(filepath)], check=True)
@@ -119,10 +119,6 @@ def git_commit(filepath: pathlib.Path, msg: str):
     subprocess.run(["git", "push"], check=True)
 
 def post_ifttt(text: str, img_url: str):
-    """
-    IFTTT Webhooks に value1/value2 を直接POST
-    （Tweet text={{Value1}}, Image URL={{Value2}} に設定してね）
-    """
     key = os.getenv("IFTTT_KEY")
     event = os.getenv("IFTTT_EVENT")
     if not (key and event):
@@ -137,12 +133,15 @@ def main():
     jst = dt.datetime.now(dt.timezone(dt.timedelta(hours=9)))  # JST
     stamp_full = jst.strftime("%Y/%m/%d %H:%M")
     stamp_day  = jst.strftime("%Y-%m-%d")
-    label_ja = "（朝の部）" if RUN_LABEL == "AM" else ("（夜の部）" if RUN_LABEL == "PM" else "")
+    month_day  = jst.strftime("%m/%d")
+    # 8:00/20:00 表記
+    time_label = "8:00時点" if RUN_LABEL == "AM" else ("20:00時点" if RUN_LABEL == "PM" else jst.strftime("%H:%M時点"))
+    label_ja   = "（朝の部）" if RUN_LABEL=="AM" else ("（夜の部）" if RUN_LABEL=="PM" else "")
 
     html = fetch_html(VOTE_URL)
     by_season = parse_votes_by_season(html)
     if not (by_season["S1"] or by_season["S2"]):
-        raise SystemExit("票データが取れませんでした。ページ構造変更の可能性。")
+        raise SystemExit("票データが取れませんでした。")
 
     top_s1 = pick_top(by_season["S1"], TOP_N)
     top_s2 = pick_top(by_season["S2"], TOP_N)
@@ -150,16 +149,11 @@ def main():
     cap_s1 = f"吸死（1期） 上位{len(top_s1)}（{stamp_full} JST）{label_ja}"
     cap_s2 = f"吸死２（2期） 上位{len(top_s2)}（{stamp_full} JST）{label_ja}"
 
-    img1 = render_image(top_s1, cap_s1)
-    img2 = render_image(top_s2, cap_s2)
+    # 1期=オレンジ、2期=紫
+    img1 = render_image(top_s1, cap_s1, bar_color='tab:orange')
+    img2 = render_image(top_s2, cap_s2, bar_color='#7e57c2')
 
-    # どちらかが空の時はある方だけ、両方あれば縦結合
-    if top_s1 and top_s2:
-        img = stitch_vertical(img1, img2)
-    elif top_s1:
-        img = img1
-    else:
-        img = img2
+    img = stitch_vertical(img1, img2) if (top_s1 and top_s2) else (img1 or img2)
 
     PUBLIC_DIR.mkdir(exist_ok=True)
     fname = f"ranking_S1S2Top{TOP_N}_{stamp_day}_{RUN_LABEL or 'RUN'}.png"
@@ -167,24 +161,21 @@ def main():
     with open(out, "wb") as f:
         f.write(img.read())
 
-    # 公開URL（Publicリポ想定。mainブランチ）
-    repo = os.getenv("GITHUB_REPOSITORY")        # owner/repo
+    repo = os.getenv("GITHUB_REPOSITORY")
     ref  = os.getenv("GITHUB_REF_NAME", "main")
     img_url = f"https://raw.githubusercontent.com/{repo}/{ref}/public/{urllib.parse.quote(fname)}"
 
-    # 画像コミット
     git_commit(out, f"Add {fname}")
 
-    # 本文
+    # 🐦ツイート文面（校正済み）
     body = (
-        f"【自動集計】吸死アニメ投票 1期Top{len(top_s1)}＋2期Top{len(top_s2)} {label_ja}\n"
-        f"{stamp_day} JST 時点\n#吸血鬼すぐ死ぬ #吸死アニメ"
+        f"🗳️エピソード投票中間結果発表（{month_day} {time_label}）🗳️\n"
+        f"投票はこちらから（1日1回）→ https://sugushinu-anime.jp/vote/\n"
+        f"#吸血鬼すぐ死ぬ\n#吸血鬼すぐ死ぬ２\n#応援上映エッヒョッヒョ"
     )
 
-    # IFTTT に直接送信（Value1=本文 / Value2=画像URL）
     post_ifttt(body, img_url)
 
-    # デバッグログ
     print(f"IFTTT_TEXT::{body}")
     print(f"IFTTT_IMG::{img_url}")
 
