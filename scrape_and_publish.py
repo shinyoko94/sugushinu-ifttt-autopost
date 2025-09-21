@@ -3,18 +3,12 @@ import requests
 from bs4 import BeautifulSoup
 import matplotlib.pyplot as plt
 from matplotlib import rcParams
-from matplotlib.patches import FancyBboxPatch
 from PIL import Image  # 画像結合
 
 # ===== フォント設定（GenEiMGothic2-Bold を最優先）=====
 def ensure_custom_font():
-    """
-    リポ直下 fonts/ にある ttf/otf を Matplotlib に登録。
-    GenEiMGothic2-Bold.ttf があればその“ファミリ名”を最優先で使う。
-    無ければ Noto にフォールバック。
-    """
+    """fonts/ 以下のttf/otfを登録。GenEiMGothic2-Bold.ttfがあれば最優先。"""
     from matplotlib import font_manager
-
     preferred_family = None
     try:
         target = "fonts/GenEiMGothic2-Bold.ttf"
@@ -22,8 +16,6 @@ def ensure_custom_font():
             font_manager.fontManager.addfont(target)
             preferred_family = font_manager.FontProperties(fname=target).get_name()
             print(f"Loaded preferred font: {preferred_family} ({target})")
-
-        # 他のフォントも登録（あれば）
         for p in glob.glob("fonts/**/*.[ot]tf", recursive=True) + glob.glob("fonts/*.[ot]tf"):
             if os.path.abspath(p) != os.path.abspath(target):
                 try:
@@ -33,18 +25,11 @@ def ensure_custom_font():
     except Exception as e:
         print("Font load warning:", e, file=sys.stderr)
 
-    if preferred_family:
-        rcParams["font.sans-serif"] = [
-            preferred_family,
-            "GenEiMGothic2", "GenEiMGothic2 Bold", "GenEiMGothic2-Bold",
-            "Noto Sans CJK JP", "Noto Sans CJK JP Regular", "DejaVu Sans",
-        ]
-    else:
-        rcParams["font.sans-serif"] = [
-            "GenEiMGothic2", "GenEiMGothic2 Bold", "GenEiMGothic2-Bold",
-            "Noto Sans CJK JP", "Noto Sans CJK JP Regular", "DejaVu Sans",
-        ]
     rcParams["font.family"] = "sans-serif"
+    rcParams["font.sans-serif"] = ([preferred_family] if preferred_family else []) + [
+        "GenEiMGothic2", "GenEiMGothic2 Bold", "GenEiMGothic2-Bold",
+        "Noto Sans CJK JP", "Noto Sans CJK JP Regular", "DejaVu Sans",
+    ]
     rcParams["axes.unicode_minus"] = False
 
 ensure_custom_font()
@@ -61,12 +46,10 @@ STOP_AT_JST = dt.datetime(2025, 10, 2, 20, 0, 0, tzinfo=dt.timezone(dt.timedelta
 
 TITLE_PREFIXES = ["吸血鬼すぐ死ぬ", "吸血鬼すぐ死ぬ２"]  # 1期 / 2期 見出し
 
-
 def fetch_html(url: str) -> str:
     r = requests.get(url, timeout=20, headers={"User-Agent":"Mozilla/5.0"})
     r.raise_for_status()
     return r.text
-
 
 def parse_votes_by_season(html: str):
     """期ごとに『タイトル』 数字を抽出 → {"S1":[(title, vote),...], "S2":[...]}"""
@@ -94,10 +77,8 @@ def parse_votes_by_season(html: str):
             out["S2"].extend(items)
     return out
 
-
 def pick_top(items, n=5):
     return sorted(items, key=lambda x: (-x[1], x[0]))[:n]
-
 
 def _wrap(s: str, width: int = 18, max_lines: int = 3) -> str:
     """タイトルを最大3行まで折り返し（4行目以降は…）"""
@@ -107,20 +88,6 @@ def _wrap(s: str, width: int = 18, max_lines: int = 3) -> str:
         lines[-1] = lines[-1].rstrip() + "…"
     return "\n".join(lines)
 
-
-def _draw_rounded_bars(ax, bars, color, radius=8):
-    """矩形バーを透明化→丸角パッチで上書き"""
-    for rect in bars:
-        x, y = rect.get_x(), rect.get_y()
-        w, h = rect.get_width(), rect.get_height()
-        rect.set_alpha(0.0)
-        rr = min(radius, h * 20)
-        patch = FancyBboxPatch((x, y), w, h,
-                               boxstyle=f"round,pad=0,rounding_size={rr}",
-                               linewidth=0, facecolor=color, edgecolor=color, zorder=3)
-        ax.add_patch(patch)
-
-
 def nice_ceiling(x: int) -> int:
     """1-2-5 の“きりの良い”刻みに丸めて繰り上げ（0は1に）"""
     if x <= 0:
@@ -128,20 +95,12 @@ def nice_ceiling(x: int) -> int:
     import math
     exp = int(math.floor(math.log10(x)))
     base = x / (10 ** exp)
-    if base <= 1:
-        nice = 1
-    elif base <= 2:
-        nice = 2
-    elif base <= 5:
-        nice = 5
-    else:
-        nice = 10
+    nice = 1 if base <= 1 else 2 if base <= 2 else 5 if base <= 5 else 10
     return int(nice * (10 ** exp))
-
 
 def render_image(top_items, caption, bar_color=None, xlim_max: int | None = None, left_pad: float = 0.36):
     """
-    丸角横棒グラフ。各バー右に“投票数”。タイトルは改行で折り返し。
+    標準barhの横棒グラフ。各バー右に“投票数”。タイトルは改行で折り返し。
     xlim_max: x軸の上限（S1/S2で統一するため外から渡す）
     """
     titles = [f"{i+1}. {_wrap(t[0])}" for i, t in enumerate(top_items)]
@@ -149,8 +108,7 @@ def render_image(top_items, caption, bar_color=None, xlim_max: int | None = None
     y = list(range(len(titles)))[::-1]
 
     fig, ax = plt.subplots(figsize=(10, 7), dpi=220)
-    bars = ax.barh(y, votes, color="none")
-    _draw_rounded_bars(ax, bars, bar_color or "tab:blue", radius=8)
+    bars = ax.barh(y, votes, color=bar_color or "tab:blue")
 
     ax.set_yticks(y)
     ax.set_yticklabels(titles, fontsize=11)
@@ -164,15 +122,15 @@ def render_image(top_items, caption, bar_color=None, xlim_max: int | None = None
     ax.set_title(caption, fontsize=14)
     ax.xaxis.grid(True, linestyle=":", alpha=0.3)
 
-    # === x軸スケールを“きりの良い値”まで繰り上げ、右余白は桁数で可変 ===
+    # x軸上限（きりの良い値）＋桁数に応じた右余白
     vmax = (max(votes) if votes else 0)
     raw_xmax = xlim_max if xlim_max is not None else vmax
     xmax_nice = nice_ceiling(raw_xmax)
     digits = len(f"{xmax_nice:,}")
-    right_margin = 0.12 + 0.02 * max(0, digits - 3)  # 12% + 桁数で増加
+    right_margin = 0.12 + 0.02 * max(0, digits - 3)
     ax.set_xlim(0, xmax_nice * (1.0 + right_margin))
 
-    # === 値ラベル（右端クランプ & 端に寄ったら内側白字） ===
+    # 値ラベル（端クランプ、右端近い時は内側白字）
     x_right = ax.get_xlim()[1]
     pad = xmax_nice * 0.02 if xmax_nice > 0 else 0.02
     for rect, v in zip(bars, votes):
@@ -181,24 +139,17 @@ def render_image(top_items, caption, bar_color=None, xlim_max: int | None = None
         ha = "left"
         color = None
         weight = "normal"
-
-        # 右端の92%以上に迫るバーは内側描画（白太字）
         if x_right > 0 and (bar_right / x_right) > 0.92:
             label_x = bar_right - pad
             ha = "right"
             color = "white"
             weight = "bold"
-
-        ax.text(label_x,
-                rect.get_y() + rect.get_height() / 2,
-                f"{v:,}",
-                va="center", ha=ha, fontsize=11,
+        ax.text(label_x, rect.get_y() + rect.get_height() / 2,
+                f"{v:,}", va="center", ha=ha, fontsize=11,
                 color=color if color else plt.rcParams["text.color"],
                 fontweight=weight, zorder=4)
 
-    # 折り返し分の左余白
     plt.subplots_adjust(left=left_pad)
-    # はみ出し防止
     plt.tight_layout()
 
     buf = io.BytesIO()
@@ -206,7 +157,6 @@ def render_image(top_items, caption, bar_color=None, xlim_max: int | None = None
     plt.close(fig)
     buf.seek(0)
     return buf
-
 
 def stitch_vertical(img1_bytes: io.BytesIO, img2_bytes: io.BytesIO) -> io.BytesIO:
     img1 = Image.open(img1_bytes).convert("RGBA")
@@ -221,14 +171,12 @@ def stitch_vertical(img1_bytes: io.BytesIO, img2_bytes: io.BytesIO) -> io.BytesI
     out.seek(0)
     return out
 
-
 def git_commit(filepath: pathlib.Path, msg: str):
     subprocess.run(["git", "config", "user.name", "github-actions[bot]"], check=True)
     subprocess.run(["git", "config", "user.email", "github-actions[bot]@users.noreply.github.com"], check=True)
     subprocess.run(["git", "add", str(filepath)], check=True)
     subprocess.run(["git", "commit", "-m", msg], check=True)
     subprocess.run(["git", "push"], check=True)
-
 
 def post_ifttt(text: str, img_url: str):
     key = os.getenv("IFTTT_KEY")
@@ -240,7 +188,6 @@ def post_ifttt(text: str, img_url: str):
     r = requests.post(url, json={"value1": text, "value2": img_url}, timeout=30)
     print("IFTTT status:", r.status_code, r.text[:200])
     return r.ok
-
 
 def main():
     # 停止判定：指定時刻“より後”はスキップ（当回は投稿）
@@ -263,7 +210,7 @@ def main():
     top_s1 = pick_top(by_season["S1"], TOP_N)
     top_s2 = pick_top(by_season["S2"], TOP_N)
 
-    # S1/S2でx軸スケールを合わせる（はみ出しに強い“きりの良い上限”を共有）
+    # 同一上限（見切れに強い“きりの良い”上限を共有）
     vmax_all = 0
     if top_s1: vmax_all = max(vmax_all, max(v for _, v in top_s1))
     if top_s2: vmax_all = max(vmax_all, max(v for _, v in top_s2))
@@ -295,11 +242,9 @@ def main():
         f"投票はこちらから（1日1回）→ https://sugushinu-anime.jp/vote/\n\n"
         f"#吸血鬼すぐ死ぬ\n#吸血鬼すぐ死ぬ２\n#応援上映エッヒョッヒョ"
     )
-
     post_ifttt(body, img_url)
     print(f"IFTTT_TEXT::{body}")
     print(f"IFTTT_IMG::{img_url}")
-
 
 if __name__ == "__main__":
     main()
