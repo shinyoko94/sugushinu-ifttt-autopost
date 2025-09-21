@@ -1,24 +1,61 @@
-import re, io, os, pathlib, datetime as dt, urllib.parse, subprocess, sys, textwrap
+import re, io, os, pathlib, datetime as dt, urllib.parse, subprocess, sys, textwrap, glob
 import requests
 from bs4 import BeautifulSoup
 import matplotlib.pyplot as plt
 from matplotlib import rcParams
+from matplotlib.patches import FancyBboxPatch
 from PIL import Image  # 画像結合
 
-# ===== 日本語フォント（豆腐対策）=====
-rcParams['font.sans-serif'] = ['Noto Sans CJK JP', 'Noto Sans CJK JP Regular', 'DejaVu Sans']
-rcParams['axes.unicode_minus'] = False
-# ======================================
+# ===== フォント設定（GenEiMGothic2-Bold を最優先）=====
+def ensure_custom_font():
+    """
+    リポ直下 fonts/ にある ttf/otf を Matplotlib に登録。
+    GenEiMGothic2-Bold.ttf があればその“ファミリ名”を最優先で使う。
+    無ければ Noto にフォールバック。
+    """
+    from matplotlib import font_manager
+
+    preferred_family = None
+    try:
+        target = "fonts/GenEiMGothic2-Bold.ttf"
+        if os.path.isfile(target):
+            font_manager.fontManager.addfont(target)
+            preferred_family = font_manager.FontProperties(fname=target).get_name()
+            print(f"Loaded preferred font: {preferred_family} ({target})")
+
+        # 他のフォントも登録（あれば）
+        for p in glob.glob("fonts/**/*.[ot]tf", recursive=True) + glob.glob("fonts/*.[ot]tf"):
+            if os.path.abspath(p) != os.path.abspath(target):
+                try:
+                    font_manager.fontManager.addfont(p)
+                except Exception:
+                    pass
+    except Exception as e:
+        print("Font load warning:", e, file=sys.stderr)
+
+    if preferred_family:
+        rcParams["font.sans-serif"] = [
+            preferred_family,
+            "GenEiMGothic2", "GenEiMGothic2 Bold", "GenEiMGothic2-Bold",
+            "Noto Sans CJK JP", "Noto Sans CJK JP Regular", "DejaVu Sans",
+        ]
+    else:
+        rcParams["font.sans-serif"] = [
+            "GenEiMGothic2", "GenEiMGothic2 Bold", "GenEiMGothic2-Bold",
+            "Noto Sans CJK JP", "Noto Sans CJK JP Regular", "DejaVu Sans",
+        ]
+    rcParams["font.family"] = "sans-serif"
+    rcParams["axes.unicode_minus"] = False
+
+ensure_custom_font()
+# ================================================
 
 VOTE_URL   = "https://sugushinu-anime.jp/vote/"
 TOP_N      = int(os.getenv("TOP_N", "5"))        # Top5
 RUN_LABEL  = os.getenv("RUN_LABEL", "")         # "AM" / "PM"（手動実行は空）
 PUBLIC_DIR = pathlib.Path("public")
 
-# ツイートにだけ入れる表記
 CAMPAIGN_PERIOD = "投票期間：9月19日（金）～10月3日（金）"
-
-# この日時“より後”は投稿停止（= 当日は投稿する）
 STOP_AT_JST = dt.datetime(2025, 10, 2, 20, 0, 0, tzinfo=dt.timezone(dt.timedelta(hours=9)))
 
 TITLE_PREFIXES = ["吸血鬼すぐ死ぬ", "吸血鬼すぐ死ぬ２"]  # 1期 / 2期 見出し
@@ -33,7 +70,6 @@ def parse_votes_by_season(html: str):
     soup = BeautifulSoup(html, "lxml")
     text = soup.get_text("\n", strip=True)
 
-    # 見出しの位置を探してブロック分割
     positions = []
     for p in TITLE_PREFIXES:
         i = text.find(p)
@@ -58,44 +94,60 @@ def parse_votes_by_season(html: str):
 def pick_top(items, n=5):
     return sorted(items, key=lambda x: (-x[1], x[0]))[:n]
 
-def _wrap(s: str, width: int = 18, max_lines: int = 2) -> str:
-    """タイトルをいい感じに折り返し（最大2行）"""
+def _wrap(s: str, width: int = 18, max_lines: int = 3) -> str:
+    """タイトルを最大3行まで折り返し（4行目以降は…）"""
     lines = textwrap.wrap(s, width=width)
-    lines = lines[:max_lines]
-    if len(lines) == max_lines and len(s) > sum(len(x) for x in lines):
+    if len(lines) > max_lines:
+        lines = lines[:max_lines]
         lines[-1] = lines[-1].rstrip() + "…"
     return "\n".join(lines)
 
-def render_image(top_items, caption, bar_color=None):
+def _draw_rounded_bars(ax, bars, color, radius=8):
+    """矩形バーを透明化→丸角パッチで上書き"""
+    for rect in bars:
+        x, y = rect.get_x(), rect.get_y()
+        w, h = rect.get_width(), rect.get_height()
+        rect.set_alpha(0.0)
+        rr = min(radius, h * 20)
+        patch = FancyBboxPatch((x, y), w, h,
+                               boxstyle=f"round,pad=0,rounding_size={rr}",
+                               linewidth=0, facecolor=color, edgecolor=color, zorder=3)
+        ax.add_patch(patch)
+
+def render_image(top_items, caption, bar_color=None, xlim_max: int | None = None, left_pad: float = 0.36):
     """
-    横棒グラフ。各バー右に票数（3桁区切り）。タイトルは改行で折り返し。
-    bar_color: 例 'tab:orange' / '#7e57c2'
+    丸角横棒グラフ。各バー右に“投票数”。タイトルは改行で折り返し。
+    xlim_max: x軸の上限（S1/S2で統一するため外から渡す）
     """
     titles = [f"{i+1}. {_wrap(t[0])}" for i, t in enumerate(top_items)]
     votes  = [int(t[1]) for t in top_items]
     y = list(range(len(titles)))[::-1]
 
     fig, ax = plt.subplots(figsize=(10, 7), dpi=220)
-    bars = ax.barh(y, votes, color=bar_color)
+    bars = ax.barh(y, votes, color="none")
+    _draw_rounded_bars(ax, bars, bar_color or "tab:blue", radius=8)
+
     ax.set_yticks(y)
     ax.set_yticklabels(titles, fontsize=11)
-    ax.set_xlabel("Votes", fontsize=11)
+    for lbl in ax.get_yticklabels():
+        lbl.set_ha("left")
+        xx, yy = lbl.get_position()
+        lbl.set_position((xx - 0.02, yy))
+
+    ax.set_xlabel("投票数", fontsize=11)
     ax.set_title(caption, fontsize=14)
     ax.xaxis.grid(True, linestyle=":", alpha=0.3)
 
-    vmax = max(votes) if votes else 0
-    ax.set_xlim(0, vmax * 1.18 if vmax > 0 else 1)
+    vmax = (max(votes) if votes else 0)
+    xmax = xlim_max if xlim_max is not None else vmax
+    ax.set_xlim(0, (xmax * 1.18 if xmax > 0 else 1))
 
-    for bar, v in zip(bars, votes):
-        ax.text(
-            bar.get_width() + (vmax * 0.02 if vmax > 0 else 0.02),
-            bar.get_y() + bar.get_height() / 2,
-            f"{v:,}",
-            va="center", ha="left", fontsize=11
-        )
+    for rect, v in zip(bars, votes):
+        ax.text(rect.get_width() + ((xmax or vmax) * 0.02 if (xmax or vmax) > 0 else 0.02),
+                rect.get_y() + rect.get_height() / 2,
+                f"{v:,}", va="center", ha="left", fontsize=11)
 
-    # 折り返し分の左余白を確保
-    plt.subplots_adjust(left=0.33)
+    plt.subplots_adjust(left=left_pad)
     plt.tight_layout()
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=220)
@@ -104,7 +156,6 @@ def render_image(top_items, caption, bar_color=None):
     return buf
 
 def stitch_vertical(img1_bytes: io.BytesIO, img2_bytes: io.BytesIO) -> io.BytesIO:
-    """2枚のPNGを縦結合して1枚に"""
     img1 = Image.open(img1_bytes).convert("RGBA")
     img2 = Image.open(img2_bytes).convert("RGBA")
     w = max(img1.width, img2.width)
@@ -136,7 +187,7 @@ def post_ifttt(text: str, img_url: str):
     return r.ok
 
 def main():
-    # 停止条件（JST）: 指定時刻“より後”はスキップ（= 当回は投稿する）
+    # 停止判定：指定時刻“より後”はスキップ（当回は投稿）
     now_jst = dt.datetime.now(dt.timezone(dt.timedelta(hours=9)))
     if now_jst > STOP_AT_JST:
         print(f"STOP: {now_jst} > {STOP_AT_JST} なので投稿スキップ")
@@ -145,7 +196,6 @@ def main():
     stamp_full = now_jst.strftime("%Y/%m/%d %H:%M")
     stamp_day  = now_jst.strftime("%Y-%m-%d")
     month_day  = now_jst.strftime("%m/%d")
-    # 24時間表記で統一
     time_label = "8:00時点" if RUN_LABEL == "AM" else ("20:00時点" if RUN_LABEL == "PM" else now_jst.strftime("%H:%M時点"))
     label_ja   = "（朝の部）" if RUN_LABEL=="AM" else ("（夜の部）" if RUN_LABEL=="PM" else "")
 
@@ -157,12 +207,17 @@ def main():
     top_s1 = pick_top(by_season["S1"], TOP_N)
     top_s2 = pick_top(by_season["S2"], TOP_N)
 
+    # S1/S2でx軸スケールを合わせる
+    vmax_all = 0
+    if top_s1: vmax_all = max(vmax_all, max(v for _, v in top_s1))
+    if top_s2: vmax_all = max(vmax_all, max(v for _, v in top_s2))
+
     cap_s1 = f"吸死（1期） 上位{len(top_s1)}（{stamp_full} JST）{label_ja}"
     cap_s2 = f"吸死２（2期） 上位{len(top_s2)}（{stamp_full} JST）{label_ja}"
 
-    # 1期=オレンジ、2期=紫
-    img1 = render_image(top_s1, cap_s1, bar_color='tab:orange')
-    img2 = render_image(top_s2, cap_s2, bar_color='#7e57c2')
+    left_pad = 0.36
+    img1 = render_image(top_s1, cap_s1, bar_color='tab:orange', xlim_max=vmax_all, left_pad=left_pad)
+    img2 = render_image(top_s2, cap_s2, bar_color='#7e57c2',   xlim_max=vmax_all, left_pad=left_pad)
     img  = stitch_vertical(img1, img2) if (top_s1 and top_s2) else (img1 or img2)
 
     PUBLIC_DIR.mkdir(exist_ok=True)
@@ -171,24 +226,20 @@ def main():
     with open(out, "wb") as f:
         f.write(img.read())
 
-    # 公開URL
     repo = os.getenv("GITHUB_REPOSITORY")
     ref  = os.getenv("GITHUB_REF_NAME", "main")
     img_url = f"https://raw.githubusercontent.com/{repo}/{ref}/public/{urllib.parse.quote(fname)}"
 
     git_commit(out, f"Add {fname}")
 
-    # 🐦ツイート文面（24時間表記・キャンペーン期間は“この行の次”に追加）
     body = (
         f"🗳️エピソード投票中間結果発表（{month_day} {time_label}）🗳️\n"
-        f"投票はこちらから（1日1回）→ https://sugushinu-anime.jp/vote/\n"
         f"{CAMPAIGN_PERIOD}\n"
+        f"投票はこちらから（1日1回）→ https://sugushinu-anime.jp/vote/\n\n"
         f"#吸血鬼すぐ死ぬ\n#吸血鬼すぐ死ぬ２\n#応援上映エッヒョッヒョ"
     )
 
     post_ifttt(body, img_url)
-
-    # デバッグ出力
     print(f"IFTTT_TEXT::{body}")
     print(f"IFTTT_IMG::{img_url}")
 
