@@ -5,46 +5,44 @@ import matplotlib.pyplot as plt
 from matplotlib import rcParams
 from PIL import Image  # 画像結合
 
-# ===== フォント設定（GenEiMGothic2-Bold を最優先）=====
+# ========== フォント（GenEiMGothic2-Bold があれば最優先） ==========
 def ensure_custom_font():
-    """fonts/ 以下のttf/otfを登録。GenEiMGothic2-Bold.ttfがあれば最優先。"""
     from matplotlib import font_manager
-    preferred_family = None
+    preferred = None
     try:
         target = "fonts/GenEiMGothic2-Bold.ttf"
         if os.path.isfile(target):
             font_manager.fontManager.addfont(target)
-            preferred_family = font_manager.FontProperties(fname=target).get_name()
-            print(f"Loaded preferred font: {preferred_family} ({target})")
+            preferred = font_manager.FontProperties(fname=target).get_name()
+            print(f"Loaded font: {preferred}")
         for p in glob.glob("fonts/**/*.[ot]tf", recursive=True) + glob.glob("fonts/*.[ot]tf"):
-            if os.path.abspath(p) != os.path.abspath(target):
-                try:
+            try:
+                if os.path.abspath(p) != os.path.abspath(target):
                     font_manager.fontManager.addfont(p)
-                except Exception:
-                    pass
+            except Exception:
+                pass
     except Exception as e:
-        print("Font load warning:", e, file=sys.stderr)
+        print("font warn:", e, file=sys.stderr)
 
     rcParams["font.family"] = "sans-serif"
-    rcParams["font.sans-serif"] = ([preferred_family] if preferred_family else []) + [
+    rcParams["font.sans-serif"] = ([preferred] if preferred else []) + [
         "GenEiMGothic2", "GenEiMGothic2 Bold", "GenEiMGothic2-Bold",
         "Noto Sans CJK JP", "Noto Sans CJK JP Regular", "DejaVu Sans",
     ]
     rcParams["axes.unicode_minus"] = False
 
 ensure_custom_font()
-# ================================================
+# ===============================================================
 
 VOTE_URL   = "https://sugushinu-anime.jp/vote/"
-TOP_N      = int(os.getenv("TOP_N", "5"))        # Top5
-RUN_LABEL  = os.getenv("RUN_LABEL", "")         # "AM" / "PM"（手動実行は空）
+TOP_N      = int(os.getenv("TOP_N", "5"))
+RUN_LABEL  = os.getenv("RUN_LABEL", "")
 PUBLIC_DIR = pathlib.Path("public")
 
 CAMPAIGN_PERIOD = "投票期間：9月19日（金）～10月3日（金）"
-# この日時“より後”は投稿停止（= 当回は投稿する）
 STOP_AT_JST = dt.datetime(2025, 10, 2, 20, 0, 0, tzinfo=dt.timezone(dt.timedelta(hours=9)))
 
-TITLE_PREFIXES = ["吸血鬼すぐ死ぬ", "吸血鬼すぐ死ぬ２"]  # 1期 / 2期 見出し
+TITLE_PREFIXES = ["吸血鬼すぐ死ぬ", "吸血鬼すぐ死ぬ２"]
 
 def fetch_html(url: str) -> str:
     r = requests.get(url, timeout=20, headers={"User-Agent":"Mozilla/5.0"})
@@ -52,7 +50,6 @@ def fetch_html(url: str) -> str:
     return r.text
 
 def parse_votes_by_season(html: str):
-    """期ごとに『タイトル』 数字を抽出 → {"S1":[(title, vote),...], "S2":[...]}"""
     soup = BeautifulSoup(html, "lxml")
     text = soup.get_text("\n", strip=True)
 
@@ -77,83 +74,48 @@ def parse_votes_by_season(html: str):
             out["S2"].extend(items)
     return out
 
-def pick_top(items, n=5):
-    return sorted(items, key=lambda x: (-x[1], x[0]))[:n]
-
-def _wrap(s: str, width: int = 18, max_lines: int = 3) -> str:
-    """タイトルを最大3行まで折り返し（4行目以降は…）"""
+# 以前の挙動：2行まで折り返し（3行目以降は…）
+def _wrap(s: str, width: int = 18, max_lines: int = 2) -> str:
     lines = textwrap.wrap(s, width=width)
-    if len(lines) > max_lines:
-        lines = lines[:max_lines]
+    lines = lines[:max_lines]
+    if len(lines) == max_lines and len(s) > sum(len(x) for x in lines):
         lines[-1] = lines[-1].rstrip() + "…"
     return "\n".join(lines)
 
-def nice_ceiling(x: int) -> int:
-    """1-2-5 の“きりの良い”刻みに丸めて繰り上げ（0は1に）"""
-    if x <= 0:
-        return 1
-    import math
-    exp = int(math.floor(math.log10(x)))
-    base = x / (10 ** exp)
-    nice = 1 if base <= 1 else 2 if base <= 2 else 5 if base <= 5 else 10
-    return int(nice * (10 ** exp))
+def pick_top(items, n=5):
+    return sorted(items, key=lambda x: (-x[1], x[0]))[:n]
 
-def render_image(top_items, caption, bar_color=None, xlim_max: int | None = None, left_pad: float = 0.36):
-    """
-    標準barhの横棒グラフ。各バー右に“投票数”。タイトルは改行で折り返し。
-    xlim_max: x軸の上限（S1/S2で統一するため外から渡す）
-    """
+def render_image(top_items, caption, bar_color=None, fixed_xlim: int | None = None):
     titles = [f"{i+1}. {_wrap(t[0])}" for i, t in enumerate(top_items)]
     votes  = [int(t[1]) for t in top_items]
     y = list(range(len(titles)))[::-1]
 
     fig, ax = plt.subplots(figsize=(10, 7), dpi=220)
-    bars = ax.barh(y, votes, color=bar_color or "tab:blue")
+    bars = ax.barh(y, votes, color=bar_color)
 
     ax.set_yticks(y)
     ax.set_yticklabels(titles, fontsize=11)
-    # yticklabel を左揃え＆少し左へ
-    for lbl in ax.get_yticklabels():
-        lbl.set_ha("left")
-        xx, yy = lbl.get_position()
-        lbl.set_position((xx - 0.02, yy))
-
-    ax.set_xlabel("投票数", fontsize=11)
+    ax.set_xlabel("投票数", fontsize=11)   # ← 変更
     ax.set_title(caption, fontsize=14)
     ax.xaxis.grid(True, linestyle=":", alpha=0.3)
 
-    # x軸上限（きりの良い値）＋桁数に応じた右余白
-    vmax = (max(votes) if votes else 0)
-    raw_xmax = xlim_max if xlim_max is not None else vmax
-    xmax_nice = nice_ceiling(raw_xmax)
-    digits = len(f"{xmax_nice:,}")
-    right_margin = 0.12 + 0.02 * max(0, digits - 3)
-    ax.set_xlim(0, xmax_nice * (1.0 + right_margin))
+    # x軸は固定で0〜800（要望）
+    xmax = fixed_xlim if fixed_xlim is not None else 800
+    ax.set_xlim(0, xmax)
 
-    # 値ラベル（端クランプ、右端近い時は内側白字）
-    x_right = ax.get_xlim()[1]
-    pad = xmax_nice * 0.02 if xmax_nice > 0 else 0.02
-    for rect, v in zip(bars, votes):
-        bar_right = rect.get_width()
-        label_x = min(bar_right + pad, x_right - pad)
-        ha = "left"
-        color = None
-        weight = "normal"
-        if x_right > 0 and (bar_right / x_right) > 0.92:
-            label_x = bar_right - pad
-            ha = "right"
-            color = "white"
-            weight = "bold"
-        ax.text(label_x, rect.get_y() + rect.get_height() / 2,
-                f"{v:,}", va="center", ha=ha, fontsize=11,
-                color=color if color else plt.rcParams["text.color"],
-                fontweight=weight, zorder=4)
+    # 値ラベル（シンプル配置）
+    pad = (xmax * 0.02) if xmax > 0 else 0.02
+    for bar, v in zip(bars, votes):
+        ax.text(bar.get_width() + pad,
+                bar.get_y() + bar.get_height() / 2,
+                f"{v:,}",
+                va="center", ha="left", fontsize=11)
 
-    plt.subplots_adjust(left=left_pad)
+    # 左余白も両グラフで固定して揃える
+    plt.subplots_adjust(left=0.33)
     plt.tight_layout()
-
     buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=220, bbox_inches="tight", pad_inches=0.1)
+    fig.savefig(buf, format="png", dpi=220)
     plt.close(fig)
     buf.seek(0)
     return buf
@@ -210,18 +172,13 @@ def main():
     top_s1 = pick_top(by_season["S1"], TOP_N)
     top_s2 = pick_top(by_season["S2"], TOP_N)
 
-    # 同一上限（見切れに強い“きりの良い”上限を共有）
-    vmax_all = 0
-    if top_s1: vmax_all = max(vmax_all, max(v for _, v in top_s1))
-    if top_s2: vmax_all = max(vmax_all, max(v for _, v in top_s2))
-    vmax_all = nice_ceiling(vmax_all)
-
     cap_s1 = f"吸死（1期） 上位{len(top_s1)}（{stamp_full} JST）{label_ja}"
     cap_s2 = f"吸死２（2期） 上位{len(top_s2)}（{stamp_full} JST）{label_ja}"
 
-    left_pad = 0.36
-    img1 = render_image(top_s1, cap_s1, bar_color='tab:orange', xlim_max=vmax_all, left_pad=left_pad)
-    img2 = render_image(top_s2, cap_s2, bar_color='#7e57c2',   xlim_max=vmax_all, left_pad=left_pad)
+    # どちらも 0〜800・同じ左余白で揃える
+    fixed_xlim = 800
+    img1 = render_image(top_s1, cap_s1, bar_color='tab:orange', fixed_xlim=fixed_xlim)
+    img2 = render_image(top_s2, cap_s2, bar_color='#7e57c2',   fixed_xlim=fixed_xlim)
     img  = stitch_vertical(img1, img2) if (top_s1 and top_s2) else (img1 or img2)
 
     PUBLIC_DIR.mkdir(exist_ok=True)
