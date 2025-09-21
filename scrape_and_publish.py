@@ -15,6 +15,12 @@ TOP_N      = int(os.getenv("TOP_N", "5"))        # Top5
 RUN_LABEL  = os.getenv("RUN_LABEL", "")         # "AM" / "PM"（手動実行は空）
 PUBLIC_DIR = pathlib.Path("public")
 
+# ツイートにだけ入れる表記
+CAMPAIGN_PERIOD = "投票期間：9月19日（金）～10月3日（金）"
+
+# この日時“より後”は投稿停止（= 当日は投稿する）
+STOP_AT_JST = dt.datetime(2025, 10, 2, 20, 0, 0, tzinfo=dt.timezone(dt.timedelta(hours=9)))
+
 TITLE_PREFIXES = ["吸血鬼すぐ死ぬ", "吸血鬼すぐ死ぬ２"]  # 1期 / 2期 見出し
 
 def fetch_html(url: str) -> str:
@@ -130,12 +136,17 @@ def post_ifttt(text: str, img_url: str):
     return r.ok
 
 def main():
-    jst = dt.datetime.now(dt.timezone(dt.timedelta(hours=9)))  # JST
-    stamp_full = jst.strftime("%Y/%m/%d %H:%M")
-    stamp_day  = jst.strftime("%Y-%m-%d")
-    month_day  = jst.strftime("%m/%d")
+    # 停止条件（JST）: 指定時刻“より後”はスキップ（= 当回は投稿する）
+    now_jst = dt.datetime.now(dt.timezone(dt.timedelta(hours=9)))
+    if now_jst > STOP_AT_JST:
+        print(f"STOP: {now_jst} > {STOP_AT_JST} なので投稿スキップ")
+        return
+
+    stamp_full = now_jst.strftime("%Y/%m/%d %H:%M")
+    stamp_day  = now_jst.strftime("%Y-%m-%d")
+    month_day  = now_jst.strftime("%m/%d")
     # 24時間表記で統一
-    time_label = "8:00時点" if RUN_LABEL == "AM" else ("20:00時点" if RUN_LABEL == "PM" else jst.strftime("%H:%M時点"))
+    time_label = "8:00時点" if RUN_LABEL == "AM" else ("20:00時点" if RUN_LABEL == "PM" else now_jst.strftime("%H:%M時点"))
     label_ja   = "（朝の部）" if RUN_LABEL=="AM" else ("（夜の部）" if RUN_LABEL=="PM" else "")
 
     html = fetch_html(VOTE_URL)
@@ -160,17 +171,18 @@ def main():
     with open(out, "wb") as f:
         f.write(img.read())
 
-    # 公開URL（Public / mainブランチ想定）
+    # 公開URL
     repo = os.getenv("GITHUB_REPOSITORY")
     ref  = os.getenv("GITHUB_REF_NAME", "main")
     img_url = f"https://raw.githubusercontent.com/{repo}/{ref}/public/{urllib.parse.quote(fname)}"
 
     git_commit(out, f"Add {fname}")
 
-    # 🐦ツイート文面（24時間表記）
+    # 🐦ツイート文面（24時間表記・キャンペーン期間は“この行の次”に追加）
     body = (
         f"🗳️エピソード投票中間結果発表（{month_day} {time_label}）🗳️\n"
         f"投票はこちらから（1日1回）→ https://sugushinu-anime.jp/vote/\n"
+        f"{CAMPAIGN_PERIOD}\n"
         f"#吸血鬼すぐ死ぬ\n#吸血鬼すぐ死ぬ２\n#応援上映エッヒョッヒョ"
     )
 
