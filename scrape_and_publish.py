@@ -1,0 +1,64 @@
+import re, io, os, json, hashlib, pathlib, datetime as dt, urllib.parse, subprocess
+import requests
+from bs4 import BeautifulSoup
+import matplotlib.pyplot as plt
+
+VOTE_URL = "https://sugushinu-anime.jp/vote/"
+TOP_N = int(os.getenv("TOP_N", "10"))
+RUN_LABEL = os.getenv("RUN_LABEL","")  # "AM"/"PM"
+PUBLIC_DIR = pathlib.Path("public")
+
+def fetch_html(url: str) -> str:
+    r = requests.get(url, timeout=20, headers={"User-Agent":"Mozilla/5.0"})
+    r.raise_for_status()
+    return r.text
+
+def parse_votes(html: str):
+    soup = BeautifulSoup(html, "lxml")
+    text = soup.get_text("\n", strip=True)
+    pat = re.compile(r"『([^』]+)』\s*([0-9]{1,6})")
+    return [(m.group(1).strip(), int(m.group(2))) for m in pat.finditer(text)]
+
+def pick_top(items, n=10):
+    return sorted(items, key=lambda x: (-x[1], x[0]))[:n]
+
+def render_image(top_items, caption):
+    titles = [f"{i+1}. {t[0]}" for i, t in enumerate(top_items)]
+    votes  = [t[1] for t in top_items]
+    y = list(range(len(titles)))[::-1]
+    fig, ax = plt.subplots(figsize=(9, 6))
+    ax.barh(y, votes)
+    ax.set_yticks(y); ax.set_yticklabels(titles, fontsize=9)
+    ax.set_xlabel("Votes"); ax.set_title(caption)
+    plt.tight_layout()
+    buf = io.BytesIO(); fig.savefig(buf, format="png", dpi=200)
+    plt.close(fig); buf.seek(0); return buf
+
+def git_commit(filepath: pathlib.Path, msg: str):
+    subprocess.run(["git", "config", "user.name", "github-actions[bot]"], check=True)
+    subprocess.run(["git", "config", "user.email", "github-actions[bot]@users.noreply.github.com"], check=True)
+    subprocess.run(["git", "add", str(filepath)], check=True)
+    subprocess.run(["git", "commit", "-m", msg], check=True)
+    subprocess.run(["git", "push"], check=True)
+
+def main():
+    jst = dt.datetime.now(dt.timezone(dt.timedelta(hours=9)))
+    stamp_full = jst.strftime("%Y/%m/%d %H:%M"); stamp_day = jst.strftime("%Y-%m-%d")
+    label_ja = "（朝の部）" if RUN_LABEL=="AM" else ("（夜の部）" if RUN_LABEL=="PM" else "")
+    html = fetch_html(VOTE_URL); items = parse_votes(html)
+    if not items: raise SystemExit("票データが取れませんでした。")
+    top = pick_top(items, TOP_N)
+    caption = f"吸死アニメ人気エピソード投票 上位{len(top)}（{stamp_full} JST）{label_ja}"
+    img = render_image(top, caption)
+    PUBLIC_DIR.mkdir(exist_ok=True)
+    fname = f"ranking_{stamp_day}_{RUN_LABEL or 'RUN'}.png"
+    out = PUBLIC_DIR / fname
+    with open(out, "wb") as f: f.write(img.read())
+    repo = os.getenv("GITHUB_REPOSITORY"); ref = os.getenv("GITHUB_REF_NAME", "main")
+    img_url = f"https://raw.githubusercontent.com/{repo}/{ref}/public/{urllib.parse.quote(fname)}"
+    git_commit(out, f"Add {fname}")
+    body = f"【自動集計】吸死アニメ投票 上位{len(top)} {label_ja}\n{stamp_day} JST 時点\n#吸血鬼すぐ死ぬ #吸死アニメ"
+    print(f"IFTTT_TEXT::{body}"); print(f"IFTTT_IMG::{img_url}")
+
+if __name__ == "__main__":
+    main()
