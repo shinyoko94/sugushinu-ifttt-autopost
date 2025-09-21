@@ -74,21 +74,18 @@ def parse_votes_by_season(html: str):
             out["S2"].extend(items)
     return out
 
-# タイトルは最大3行、以降は「…」
-def _wrap(s: str, width: int = 18, max_lines: int = 3) -> str:
+# 安定版：タイトルは最大2行（以降は…）
+def _wrap(s: str, width: int = 18, max_lines: int = 2) -> str:
     lines = textwrap.wrap(s, width=width)
-    if len(lines) > max_lines:
-        lines = lines[:max_lines]
+    lines = lines[:max_lines]
+    if len(lines) == max_lines and len(s) > sum(len(x) for x in lines):
         lines[-1] = lines[-1].rstrip() + "…"
     return "\n".join(lines)
 
 def pick_top(items, n=5):
     return sorted(items, key=lambda x: (-x[1], x[0]))[:n]
 
-def render_image(top_items, caption, bar_color=None, fixed_xlim: int = 800, left_pad: float = 0.38):
-    """
-    横棒グラフ（標準barh）。1期/2期で同じ xlim と left_pad を使えば開始位置が揃う。
-    """
+def render_image(top_items, caption, bar_color=None, fixed_xlim: int = 800):
     titles = [f"{i+1}. {_wrap(t[0])}" for i, t in enumerate(top_items)]
     votes  = [int(t[1]) for t in top_items]
     y = list(range(len(titles)))[::-1]
@@ -96,33 +93,26 @@ def render_image(top_items, caption, bar_color=None, fixed_xlim: int = 800, left
     fig, ax = plt.subplots(figsize=(10, 7), dpi=220)
     bars = ax.barh(y, votes, color=bar_color)
 
-    # ytick 左寄せ＋ちょい左へオフセット（順位を左端側に）
     ax.set_yticks(y)
-    labels = ax.set_yticklabels(titles, fontsize=20, linespacing=1.2)  # ← 2倍近く
-    for lbl in labels:
-        lbl.set_ha("left")
-        x0, yy = lbl.get_position()
-        lbl.set_position((x0 - 0.02, yy))  # ほんの少し左に出す
-
-    ax.set_xlabel("投票数", fontsize=18)     # 軸ラベルも大きく
-    ax.set_title(caption, fontsize=22)
+    ax.set_yticklabels(titles, fontsize=11)       # ← 以前どおり
+    ax.set_xlabel("投票数", fontsize=11)          # ← 以前どおり
+    ax.set_title(caption, fontsize=14)            # ← 以前どおり
     ax.xaxis.grid(True, linestyle=":", alpha=0.3)
 
     # x軸は固定で0〜800（要望）
     ax.set_xlim(0, fixed_xlim)
 
-    # 値ラベル（フォント大きめ）
+    # 票数ラベルだけフォント2倍（22pt）
     pad = (fixed_xlim * 0.02) if fixed_xlim > 0 else 0.02
     for bar, v in zip(bars, votes):
         ax.text(bar.get_width() + pad,
                 bar.get_y() + bar.get_height() / 2,
                 f"{v:,}",
-                va="center", ha="left", fontsize=18)
+                va="center", ha="left", fontsize=22)  # ★ここだけ大きく
 
-    # 左余白を固定（両グラフで同値を使って開始位置を揃える）
-    plt.subplots_adjust(left=left_pad)
+    # 左余白は以前の値（重なり回避）
+    plt.subplots_adjust(left=0.33)
     plt.tight_layout()
-
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=220)
     plt.close(fig)
@@ -130,6 +120,7 @@ def render_image(top_items, caption, bar_color=None, fixed_xlim: int = 800, left
     return buf
 
 def stitch_vertical(img1_bytes: io.BytesIO, img2_bytes: io.BytesIO) -> io.BytesIO:
+    from PIL import Image
     img1 = Image.open(img1_bytes).convert("RGBA")
     img2 = Image.open(img2_bytes).convert("RGBA")
     w = max(img1.width, img2.width)
@@ -184,11 +175,9 @@ def main():
     cap_s1 = f"吸死（1期） 上位{len(top_s1)}（{stamp_full} JST）{label_ja}"
     cap_s2 = f"吸死２（2期） 上位{len(top_s2)}（{stamp_full} JST）{label_ja}"
 
-    # 0〜800固定＆同じ左余白で揃える
     fixed_xlim = 800
-    left_pad   = 0.38
-    img1 = render_image(top_s1, cap_s1, bar_color='tab:orange', fixed_xlim=fixed_xlim, left_pad=left_pad)
-    img2 = render_image(top_s2, cap_s2, bar_color='#7e57c2',   fixed_xlim=fixed_xlim, left_pad=left_pad)
+    img1 = render_image(top_s1, cap_s1, bar_color='tab:orange', fixed_xlim=fixed_xlim)
+    img2 = render_image(top_s2, cap_s2, bar_color='#7e57c2',   fixed_xlim=fixed_xlim)
     img  = stitch_vertical(img1, img2) if (top_s1 and top_s2) else (img1 or img2)
 
     PUBLIC_DIR.mkdir(exist_ok=True)
