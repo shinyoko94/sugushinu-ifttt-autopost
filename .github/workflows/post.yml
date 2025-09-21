@@ -1,0 +1,49 @@
+name: Vote → IFTTT auto-post (2x daily)
+
+on:
+  schedule:
+    - cron: "0 0 * * *"   # 09:00 JST
+    - cron: "0 12 * * *"  # 21:00 JST
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: sudo apt-get update && sudo apt-get install -y fonts-noto-cjk
+      - run: pip install -r requirements.txt
+      - name: AM run vars
+        if: ${{ github.event.schedule == '0 0 * * *' }}
+        run: echo "RUN_LABEL=AM" >> $GITHUB_ENV
+      - name: PM run vars
+        if: ${{ github.event.schedule == '0 12 * * *' }}
+        run: echo "RUN_LABEL=PM" >> $GITHUB_ENV
+      - name: Scrape → Image → Commit
+        env:
+          TOP_N: "10"
+        run: |
+          python scrape_and_publish.py | tee output.txt
+          TEXT=$(grep '^IFTTT_TEXT::' output.txt | sed 's/^IFTTT_TEXT:://')
+          IMG=$(grep '^IFTTT_IMG::'  output.txt | sed 's/^IFTTT_IMG:://')
+          echo "TEXT=$TEXT" >> $GITHUB_ENV
+          echo "IMG=$IMG"   >> $GITHUB_ENV
+      - name: Trigger IFTTT (tweet with image)
+        env:
+          IFTTT_KEY: ${{ secrets.IFTTT_KEY }}
+          IFTTT_EVENT: ${{ secrets.IFTTT_EVENT }}
+          TEXT: ${{ env.TEXT }}
+          IMG: ${{ env.IMG }}
+        run: |
+          curl -s -X POST \
+            -H "Content-Type: application/json" \
+            -d "{\"value1\":\"${TEXT}\",\"value2\":\"${IMG}\"}" \
+            "https://maker.ifttt.com/trigger/${IFTTT_EVENT}/with/key/${IFTTT_KEY}"
