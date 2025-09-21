@@ -56,14 +56,17 @@ RUN_LABEL  = os.getenv("RUN_LABEL", "")         # "AM" / "PM"（手動実行は�
 PUBLIC_DIR = pathlib.Path("public")
 
 CAMPAIGN_PERIOD = "投票期間：9月19日（金）～10月3日（金）"
+# この日時“より後”は投稿停止（= 当回は投稿する）
 STOP_AT_JST = dt.datetime(2025, 10, 2, 20, 0, 0, tzinfo=dt.timezone(dt.timedelta(hours=9)))
 
 TITLE_PREFIXES = ["吸血鬼すぐ死ぬ", "吸血鬼すぐ死ぬ２"]  # 1期 / 2期 見出し
+
 
 def fetch_html(url: str) -> str:
     r = requests.get(url, timeout=20, headers={"User-Agent":"Mozilla/5.0"})
     r.raise_for_status()
     return r.text
+
 
 def parse_votes_by_season(html: str):
     """期ごとに『タイトル』 数字を抽出 → {"S1":[(title, vote),...], "S2":[...]}"""
@@ -91,8 +94,10 @@ def parse_votes_by_season(html: str):
             out["S2"].extend(items)
     return out
 
+
 def pick_top(items, n=5):
     return sorted(items, key=lambda x: (-x[1], x[0]))[:n]
+
 
 def _wrap(s: str, width: int = 18, max_lines: int = 3) -> str:
     """タイトルを最大3行まで折り返し（4行目以降は…）"""
@@ -101,6 +106,7 @@ def _wrap(s: str, width: int = 18, max_lines: int = 3) -> str:
         lines = lines[:max_lines]
         lines[-1] = lines[-1].rstrip() + "…"
     return "\n".join(lines)
+
 
 def _draw_rounded_bars(ax, bars, color, radius=8):
     """矩形バーを透明化→丸角パッチで上書き"""
@@ -113,6 +119,25 @@ def _draw_rounded_bars(ax, bars, color, radius=8):
                                boxstyle=f"round,pad=0,rounding_size={rr}",
                                linewidth=0, facecolor=color, edgecolor=color, zorder=3)
         ax.add_patch(patch)
+
+
+def nice_ceiling(x: int) -> int:
+    """1-2-5 の“きりの良い”刻みに丸めて繰り上げ（0は1に）"""
+    if x <= 0:
+        return 1
+    import math
+    exp = int(math.floor(math.log10(x)))
+    base = x / (10 ** exp)
+    if base <= 1:
+        nice = 1
+    elif base <= 2:
+        nice = 2
+    elif base <= 5:
+        nice = 5
+    else:
+        nice = 10
+    return int(nice * (10 ** exp))
+
 
 def render_image(top_items, caption, bar_color=None, xlim_max: int | None = None, left_pad: float = 0.36):
     """
@@ -129,6 +154,7 @@ def render_image(top_items, caption, bar_color=None, xlim_max: int | None = None
 
     ax.set_yticks(y)
     ax.set_yticklabels(titles, fontsize=11)
+    # yticklabel を左揃え＆少し左へ
     for lbl in ax.get_yticklabels():
         lbl.set_ha("left")
         xx, yy = lbl.get_position()
@@ -138,22 +164,49 @@ def render_image(top_items, caption, bar_color=None, xlim_max: int | None = None
     ax.set_title(caption, fontsize=14)
     ax.xaxis.grid(True, linestyle=":", alpha=0.3)
 
+    # === x軸スケールを“きりの良い値”まで繰り上げ、右余白は桁数で可変 ===
     vmax = (max(votes) if votes else 0)
-    xmax = xlim_max if xlim_max is not None else vmax
-    ax.set_xlim(0, (xmax * 1.18 if xmax > 0 else 1))
+    raw_xmax = xlim_max if xlim_max is not None else vmax
+    xmax_nice = nice_ceiling(raw_xmax)
+    digits = len(f"{xmax_nice:,}")
+    right_margin = 0.12 + 0.02 * max(0, digits - 3)  # 12% + 桁数で増加
+    ax.set_xlim(0, xmax_nice * (1.0 + right_margin))
 
+    # === 値ラベル（右端クランプ & 端に寄ったら内側白字） ===
+    x_right = ax.get_xlim()[1]
+    pad = xmax_nice * 0.02 if xmax_nice > 0 else 0.02
     for rect, v in zip(bars, votes):
-        ax.text(rect.get_width() + ((xmax or vmax) * 0.02 if (xmax or vmax) > 0 else 0.02),
-                rect.get_y() + rect.get_height() / 2,
-                f"{v:,}", va="center", ha="left", fontsize=11)
+        bar_right = rect.get_width()
+        label_x = min(bar_right + pad, x_right - pad)
+        ha = "left"
+        color = None
+        weight = "normal"
 
+        # 右端の92%以上に迫るバーは内側描画（白太字）
+        if x_right > 0 and (bar_right / x_right) > 0.92:
+            label_x = bar_right - pad
+            ha = "right"
+            color = "white"
+            weight = "bold"
+
+        ax.text(label_x,
+                rect.get_y() + rect.get_height() / 2,
+                f"{v:,}",
+                va="center", ha=ha, fontsize=11,
+                color=color if color else plt.rcParams["text.color"],
+                fontweight=weight, zorder=4)
+
+    # 折り返し分の左余白
     plt.subplots_adjust(left=left_pad)
+    # はみ出し防止
     plt.tight_layout()
+
     buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=220)
+    fig.savefig(buf, format="png", dpi=220, bbox_inches="tight", pad_inches=0.1)
     plt.close(fig)
     buf.seek(0)
     return buf
+
 
 def stitch_vertical(img1_bytes: io.BytesIO, img2_bytes: io.BytesIO) -> io.BytesIO:
     img1 = Image.open(img1_bytes).convert("RGBA")
@@ -168,12 +221,14 @@ def stitch_vertical(img1_bytes: io.BytesIO, img2_bytes: io.BytesIO) -> io.BytesI
     out.seek(0)
     return out
 
+
 def git_commit(filepath: pathlib.Path, msg: str):
     subprocess.run(["git", "config", "user.name", "github-actions[bot]"], check=True)
     subprocess.run(["git", "config", "user.email", "github-actions[bot]@users.noreply.github.com"], check=True)
     subprocess.run(["git", "add", str(filepath)], check=True)
     subprocess.run(["git", "commit", "-m", msg], check=True)
     subprocess.run(["git", "push"], check=True)
+
 
 def post_ifttt(text: str, img_url: str):
     key = os.getenv("IFTTT_KEY")
@@ -185,6 +240,7 @@ def post_ifttt(text: str, img_url: str):
     r = requests.post(url, json={"value1": text, "value2": img_url}, timeout=30)
     print("IFTTT status:", r.status_code, r.text[:200])
     return r.ok
+
 
 def main():
     # 停止判定：指定時刻“より後”はスキップ（当回は投稿）
@@ -207,10 +263,11 @@ def main():
     top_s1 = pick_top(by_season["S1"], TOP_N)
     top_s2 = pick_top(by_season["S2"], TOP_N)
 
-    # S1/S2でx軸スケールを合わせる
+    # S1/S2でx軸スケールを合わせる（はみ出しに強い“きりの良い上限”を共有）
     vmax_all = 0
     if top_s1: vmax_all = max(vmax_all, max(v for _, v in top_s1))
     if top_s2: vmax_all = max(vmax_all, max(v for _, v in top_s2))
+    vmax_all = nice_ceiling(vmax_all)
 
     cap_s1 = f"吸死（1期） 上位{len(top_s1)}（{stamp_full} JST）{label_ja}"
     cap_s2 = f"吸死２（2期） 上位{len(top_s2)}（{stamp_full} JST）{label_ja}"
@@ -242,6 +299,7 @@ def main():
     post_ifttt(body, img_url)
     print(f"IFTTT_TEXT::{body}")
     print(f"IFTTT_IMG::{img_url}")
+
 
 if __name__ == "__main__":
     main()
