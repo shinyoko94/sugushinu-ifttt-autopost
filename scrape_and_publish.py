@@ -1,9 +1,9 @@
-import re, io, os, json, pathlib, datetime as dt, urllib.parse, subprocess, sys, textwrap
+import re, io, os, pathlib, datetime as dt, urllib.parse, subprocess, sys, textwrap
 import requests
 from bs4 import BeautifulSoup
 import matplotlib.pyplot as plt
 from matplotlib import rcParams
-from PIL import Image  # 画像結合用
+from PIL import Image  # 画像結合
 
 # ===== 日本語フォント（豆腐対策）=====
 rcParams['font.sans-serif'] = ['Noto Sans CJK JP', 'Noto Sans CJK JP Regular', 'DejaVu Sans']
@@ -12,7 +12,7 @@ rcParams['axes.unicode_minus'] = False
 
 VOTE_URL   = "https://sugushinu-anime.jp/vote/"
 TOP_N      = int(os.getenv("TOP_N", "5"))        # Top5
-RUN_LABEL  = os.getenv("RUN_LABEL", "")         # "AM"/"PM"（手動実行は空）
+RUN_LABEL  = os.getenv("RUN_LABEL", "")         # "AM" / "PM"（手動実行は空）
 PUBLIC_DIR = pathlib.Path("public")
 
 TITLE_PREFIXES = ["吸血鬼すぐ死ぬ", "吸血鬼すぐ死ぬ２"]  # 1期 / 2期 見出し
@@ -23,7 +23,7 @@ def fetch_html(url: str) -> str:
     return r.text
 
 def parse_votes_by_season(html: str):
-    """期ごとに『タイトル』 数字を抽出して {"S1":[(title,vote),...], "S2":[...]} を返す"""
+    """期ごとに『タイトル』 数字を抽出 → {"S1":[(title, vote),...], "S2":[...]}"""
     soup = BeautifulSoup(html, "lxml")
     text = soup.get_text("\n", strip=True)
 
@@ -62,15 +62,15 @@ def _wrap(s: str, width: int = 18, max_lines: int = 2) -> str:
 
 def render_image(top_items, caption, bar_color=None):
     """
-    横棒グラフ。各バーの右に票数（3桁区切り）。タイトルは改行で折り返し。
-    bar_color: 例 'tab:orange' / '#7e57c2' など
+    横棒グラフ。各バー右に票数（3桁区切り）。タイトルは改行で折り返し。
+    bar_color: 例 'tab:orange' / '#7e57c2'
     """
     titles = [f"{i+1}. {_wrap(t[0])}" for i, t in enumerate(top_items)]
     votes  = [int(t[1]) for t in top_items]
     y = list(range(len(titles)))[::-1]
 
     fig, ax = plt.subplots(figsize=(10, 7), dpi=220)
-    bars = ax.barh(y, votes, color=bar_color)  # ← 色指定OK（GitHub Actionsで使う用）
+    bars = ax.barh(y, votes, color=bar_color)
     ax.set_yticks(y)
     ax.set_yticklabels(titles, fontsize=11)
     ax.set_xlabel("Votes", fontsize=11)
@@ -88,7 +88,7 @@ def render_image(top_items, caption, bar_color=None):
             va="center", ha="left", fontsize=11
         )
 
-    # 左余白を少し広げて折り返し分を確保
+    # 折り返し分の左余白を確保
     plt.subplots_adjust(left=0.33)
     plt.tight_layout()
     buf = io.BytesIO()
@@ -98,7 +98,7 @@ def render_image(top_items, caption, bar_color=None):
     return buf
 
 def stitch_vertical(img1_bytes: io.BytesIO, img2_bytes: io.BytesIO) -> io.BytesIO:
-    """2枚のPNGを縦に結合して1枚のPNGに"""
+    """2枚のPNGを縦結合して1枚に"""
     img1 = Image.open(img1_bytes).convert("RGBA")
     img2 = Image.open(img2_bytes).convert("RGBA")
     w = max(img1.width, img2.width)
@@ -134,7 +134,7 @@ def main():
     stamp_full = jst.strftime("%Y/%m/%d %H:%M")
     stamp_day  = jst.strftime("%Y-%m-%d")
     month_day  = jst.strftime("%m/%d")
-    # 8:00/20:00 表記
+    # 24時間表記で統一
     time_label = "8:00時点" if RUN_LABEL == "AM" else ("20:00時点" if RUN_LABEL == "PM" else jst.strftime("%H:%M時点"))
     label_ja   = "（朝の部）" if RUN_LABEL=="AM" else ("（夜の部）" if RUN_LABEL=="PM" else "")
 
@@ -152,8 +152,7 @@ def main():
     # 1期=オレンジ、2期=紫
     img1 = render_image(top_s1, cap_s1, bar_color='tab:orange')
     img2 = render_image(top_s2, cap_s2, bar_color='#7e57c2')
-
-    img = stitch_vertical(img1, img2) if (top_s1 and top_s2) else (img1 or img2)
+    img  = stitch_vertical(img1, img2) if (top_s1 and top_s2) else (img1 or img2)
 
     PUBLIC_DIR.mkdir(exist_ok=True)
     fname = f"ranking_S1S2Top{TOP_N}_{stamp_day}_{RUN_LABEL or 'RUN'}.png"
@@ -161,13 +160,14 @@ def main():
     with open(out, "wb") as f:
         f.write(img.read())
 
+    # 公開URL（Public / mainブランチ想定）
     repo = os.getenv("GITHUB_REPOSITORY")
     ref  = os.getenv("GITHUB_REF_NAME", "main")
     img_url = f"https://raw.githubusercontent.com/{repo}/{ref}/public/{urllib.parse.quote(fname)}"
 
     git_commit(out, f"Add {fname}")
 
-    # 🐦ツイート文面（校正済み）
+    # 🐦ツイート文面（24時間表記）
     body = (
         f"🗳️エピソード投票中間結果発表（{month_day} {time_label}）🗳️\n"
         f"投票はこちらから（1日1回）→ https://sugushinu-anime.jp/vote/\n"
@@ -176,6 +176,7 @@ def main():
 
     post_ifttt(body, img_url)
 
+    # デバッグ出力
     print(f"IFTTT_TEXT::{body}")
     print(f"IFTTT_IMG::{img_url}")
 
