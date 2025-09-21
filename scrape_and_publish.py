@@ -3,7 +3,7 @@ import requests
 from bs4 import BeautifulSoup
 import matplotlib.pyplot as plt
 from matplotlib import rcParams
-from PIL import Image  # 画像結合
+from PIL import Image
 
 # ========== フォント（GenEiMGothic2-Bold があれば最優先） ==========
 def ensure_custom_font():
@@ -41,7 +41,6 @@ PUBLIC_DIR = pathlib.Path("public")
 
 CAMPAIGN_PERIOD = "投票期間：9月19日（金）～10月3日（金）"
 STOP_AT_JST = dt.datetime(2025, 10, 2, 20, 0, 0, tzinfo=dt.timezone(dt.timedelta(hours=9)))
-
 TITLE_PREFIXES = ["吸血鬼すぐ死ぬ", "吸血鬼すぐ死ぬ２"]
 
 def fetch_html(url: str) -> str:
@@ -74,7 +73,7 @@ def parse_votes_by_season(html: str):
             out["S2"].extend(items)
     return out
 
-# 安定版：タイトルは最大2行（以降は…）
+# タイトルは最大2行（以降は…）
 def _wrap(s: str, width: int = 18, max_lines: int = 2) -> str:
     lines = textwrap.wrap(s, width=width)
     lines = lines[:max_lines]
@@ -85,71 +84,30 @@ def _wrap(s: str, width: int = 18, max_lines: int = 2) -> str:
 def pick_top(items, n=5):
     return sorted(items, key=lambda x: (-x[1], x[0]))[:n]
 
-def render_image(top_items, caption, bar_color=None, fixed_xlim: int = 800):
-    titles = [f"{i+1}. {_wrap(t[0])}" for i, t in enumerate(top_items)]
-    votes  = [int(t[1]) for t in top_items]
+# ---- ここからグラフ描画（共通） ----
+def draw_panel(ax, items, color, caption, fixed_xlim=800, show_xlabel=False):
+    titles = [f"{i+1}. {_wrap(t[0])}" for i, t in enumerate(items)]
+    votes  = [int(t[1]) for t in items]
     y = list(range(len(titles)))[::-1]
 
-    fig, ax = plt.subplots(figsize=(10, 7), dpi=220)
-    bars = ax.barh(y, votes, color=bar_color)
+    bars = ax.barh(y, votes, color=color)
 
     ax.set_yticks(y)
-    ax.set_yticklabels(titles, fontsize=11)       # ← 以前どおり
-    ax.set_xlabel("投票数", fontsize=11)          # ← 以前どおり
-    ax.set_title(caption, fontsize=14)            # ← 以前どおり
+    ax.set_yticklabels(titles, fontsize=11)     # ←安定版サイズ
+    if show_xlabel:
+        ax.set_xlabel("投票数", fontsize=11)
+    ax.set_title(caption, fontsize=14)
     ax.xaxis.grid(True, linestyle=":", alpha=0.3)
 
-    # x軸は固定で0〜800（要望）
     ax.set_xlim(0, fixed_xlim)
 
-    # 票数ラベルだけフォント2倍（22pt）
-    pad = (fixed_xlim * 0.02) if fixed_xlim > 0 else 0.02
+    # 票数だけ大きめ（22pt）
+    pad = fixed_xlim * 0.02
     for bar, v in zip(bars, votes):
         ax.text(bar.get_width() + pad,
                 bar.get_y() + bar.get_height() / 2,
                 f"{v:,}",
-                va="center", ha="left", fontsize=22)  # ★ここだけ大きく
-
-    # 左余白は以前の値（重なり回避）
-    plt.subplots_adjust(left=0.33)
-    plt.tight_layout()
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=220)
-    plt.close(fig)
-    buf.seek(0)
-    return buf
-
-def stitch_vertical(img1_bytes: io.BytesIO, img2_bytes: io.BytesIO) -> io.BytesIO:
-    from PIL import Image
-    img1 = Image.open(img1_bytes).convert("RGBA")
-    img2 = Image.open(img2_bytes).convert("RGBA")
-    w = max(img1.width, img2.width)
-    h = img1.height + img2.height
-    canvas = Image.new("RGBA", (w, h), (255, 255, 255, 0))
-    canvas.paste(img1, (0, 0))
-    canvas.paste(img2, (0, img1.height))
-    out = io.BytesIO()
-    canvas.save(out, format="PNG")
-    out.seek(0)
-    return out
-
-def git_commit(filepath: pathlib.Path, msg: str):
-    subprocess.run(["git", "config", "user.name", "github-actions[bot]"], check=True)
-    subprocess.run(["git", "config", "user.email", "github-actions[bot]@users.noreply.github.com"], check=True)
-    subprocess.run(["git", "add", str(filepath)], check=True)
-    subprocess.run(["git", "commit", "-m", msg], check=True)
-    subprocess.run(["git", "push"], check=True)
-
-def post_ifttt(text: str, img_url: str):
-    key = os.getenv("IFTTT_KEY")
-    event = os.getenv("IFTTT_EVENT")
-    if not (key and event):
-        print("IFTTT_KEY/IFTTT_EVENT 未設定なので送信スキップ", file=sys.stderr)
-        return False
-    url = f"https://maker.ifttt.com/trigger/{event}/with/key/{key}"
-    r = requests.post(url, json={"value1": text, "value2": img_url}, timeout=30)
-    print("IFTTT status:", r.status_code, r.text[:200])
-    return r.ok
+                va="center", ha="left", fontsize=22)
 
 def main():
     # 停止判定：指定時刻“より後”はスキップ（当回は投稿）
@@ -175,30 +133,48 @@ def main():
     cap_s1 = f"吸死（1期） 上位{len(top_s1)}（{stamp_full} JST）{label_ja}"
     cap_s2 = f"吸死２（2期） 上位{len(top_s2)}（{stamp_full} JST）{label_ja}"
 
+    # ---- 同一キャンバスに2サブプロット、x軸共有で完全に揃える ----
     fixed_xlim = 800
-    img1 = render_image(top_s1, cap_s1, bar_color='tab:orange', fixed_xlim=fixed_xlim)
-    img2 = render_image(top_s2, cap_s2, bar_color='#7e57c2',   fixed_xlim=fixed_xlim)
-    img  = stitch_vertical(img1, img2) if (top_s1 and top_s2) else (img1 or img2)
+    fig, axes = plt.subplots(nrows=2, ncols=1, figsize=(10, 12), dpi=220, sharex=True)
+    # レイアウトは手動で統一（tight_layoutは使わない）
+    fig.subplots_adjust(left=0.33, right=0.98, top=0.96, bottom=0.08, hspace=0.28)
+
+    draw_panel(axes[0], top_s1, 'tab:orange', cap_s1, fixed_xlim=fixed_xlim, show_xlabel=False)
+    draw_panel(axes[1], top_s2, '#7e57c2',   cap_s2, fixed_xlim=fixed_xlim, show_xlabel=True)
 
     PUBLIC_DIR.mkdir(exist_ok=True)
     fname = f"ranking_S1S2Top{TOP_N}_{stamp_day}_{RUN_LABEL or 'RUN'}.png"
     out   = PUBLIC_DIR / fname
-    with open(out, "wb") as f:
-        f.write(img.read())
+    fig.savefig(out, format="png", dpi=220)
+    plt.close(fig)
 
     repo = os.getenv("GITHUB_REPOSITORY")
     ref  = os.getenv("GITHUB_REF_NAME", "main")
     img_url = f"https://raw.githubusercontent.com/{repo}/{ref}/public/{urllib.parse.quote(fname)}"
 
-    git_commit(out, f"Add {fname}")
+    # Git commit & push
+    subprocess.run(["git", "config", "user.name", "github-actions[bot]"], check=True)
+    subprocess.run(["git", "config", "user.email", "github-actions[bot]@users.noreply.github.com"], check=True)
+    subprocess.run(["git", "add", str(out)], check=True)
+    subprocess.run(["git", "commit", "-m", f"Add {fname}"], check=True)
+    subprocess.run(["git", "push"], check=True)
 
+    # IFTTT 投稿
+    key   = os.getenv("IFTTT_KEY")
+    event = os.getenv("IFTTT_EVENT")
     body = (
         f"🗳️エピソード投票中間結果発表（{month_day} {time_label}）🗳️\n"
         f"{CAMPAIGN_PERIOD}\n"
         f"投票はこちらから（1日1回）→ https://sugushinu-anime.jp/vote/\n\n"
         f"#吸血鬼すぐ死ぬ\n#吸血鬼すぐ死ぬ２\n#応援上映エッヒョッヒョ"
     )
-    post_ifttt(body, img_url)
+    if key and event:
+        url = f"https://maker.ifttt.com/trigger/{event}/with/key/{key}"
+        r = requests.post(url, json={"value1": body, "value2": img_url}, timeout=30)
+        print("IFTTT status:", r.status_code, r.text[:200])
+    else:
+        print("IFTTT_KEY/IFTTT_EVENT 未設定なので送信スキップ", file=sys.stderr)
+
     print(f"IFTTT_TEXT::{body}")
     print(f"IFTTT_IMG::{img_url}")
 
