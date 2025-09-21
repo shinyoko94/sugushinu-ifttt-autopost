@@ -7,12 +7,11 @@ on:
   workflow_dispatch: {}
 
 permissions:
-  contents: write   # 画像を public/ にコミットするため
+  contents: write
 
 jobs:
   run:
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
         with:
@@ -22,18 +21,15 @@ jobs:
         with:
           python-version: "3.11"
 
-      # 日本語フォント（豆腐対策）
       - run: sudo apt-get update && sudo apt-get install -y fonts-noto-cjk
 
-      # 依存をインストール（requirements.txt が無い場合のフォールバック付き）
       - run: |
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
           else
-            pip install requests beautifulsoup4 matplotlib lxml
+            pip install requests beautifulsoup4 matplotlib lxml pillow
           fi
 
-      # スケジュール起動時だけ AM/PM ラベルを付与（手動実行は空）
       - name: AM run vars
         if: ${{ github.event.schedule == '0 0 * * *' }}
         run: echo "RUN_LABEL=AM" >> $GITHUB_ENV
@@ -42,11 +38,10 @@ jobs:
         if: ${{ github.event.schedule == '0 12 * * *' }}
         run: echo "RUN_LABEL=PM" >> $GITHUB_ENV
 
-      # スクレイプ → 画像作成 → public/にコミット → IFTTTに直接POST
       - name: Scrape → Image → Commit → IFTTT
         env:
-          TOP_N: "10"                               # 上位件数はここで調整
-          IFTTT_KEY: ${{ secrets.IFTTT_KEY }}       # /use/ の後ろのキー本体
-          IFTTT_EVENT: ${{ secrets.IFTTT_EVENT }}   # IFTTT のイベント名（例：sugushinu_vote_update）
+          TOP_N: "5"                                # ★ ここを Top5 に
+          IFTTT_KEY: ${{ secrets.IFTTT_KEY }}
+          IFTTT_EVENT: ${{ secrets.IFTTT_EVENT }}
           RUN_LABEL: ${{ env.RUN_LABEL }}
         run: python scrape_and_publish.py
