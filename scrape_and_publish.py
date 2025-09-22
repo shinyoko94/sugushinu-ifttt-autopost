@@ -33,7 +33,7 @@ def ensure_custom_font():
     )
     rcParams["axes.unicode_minus"] = False
     # 可読性
-    rcParams["axes.titlesize"] = 14
+    rcParams["axes.titlesize"]  = 14
     rcParams["axes.labelsize"]  = 12
     rcParams["xtick.labelsize"] = 12
     rcParams["ytick.labelsize"] = 12
@@ -42,7 +42,7 @@ ensure_custom_font()
 # =================================================
 
 VOTE_URL   = "https://sugushinu-anime.jp/vote/"
-TOP_N      = int(os.getenv("TOP_N", "5"))
+TOP_N      = int(os.getenv("TOP_N", "5"))  # 表示は固定で「上位5位」にするけど、抽出自体はTOP_Nで
 RUN_LABEL  = os.getenv("RUN_LABEL", "")
 PUBLIC_DIR = pathlib.Path("public")
 
@@ -92,7 +92,7 @@ def _wrap(s: str, width: int = 18, max_lines: int = 2) -> str:
 def pick_top(items, n=5):
     return sorted(items, key=lambda x: (-x[1], x[0]))[:n]
 
-# 表示用アンカー（AM=08:00 / PM=20:00）
+# 表示用アンカー（AM=08:00 / PM=20:00）※グラフのタイトルには使わない
 def anchor_time_jst(now_jst: dt.datetime, run_label: str) -> dt.datetime:
     tz = dt.timezone(dt.timedelta(hours=9))
     d = now_jst.date()
@@ -155,7 +155,7 @@ def draw_panel(ax, items, caption, grad_from_to: tuple[str,str], fixed_xlim: int
 
     ax.set_yticks(y)
     ax.set_yticklabels(titles, color='black')
-    ax.set_title(caption, color='black')
+    ax.set_title(caption, color='black')  # タイトルは左揃えが良ければ loc='left'
 
     # ===== 上下だけ余白を入れる（バー端が枠に当たらないように）=====
     top_pad = 0.6
@@ -181,12 +181,10 @@ def main():
         print(f"STOP: {now_jst} > {STOP_AT_JST} なので投稿スキップ")
         return
 
-    anchor = anchor_time_jst(now_jst, RUN_LABEL)
-    stamp_full = anchor.strftime("%Y/%m/%d %H:%M")
+    anchor = anchor_time_jst(now_jst, RUN_LABEL)  # ツイート文面の時刻表記用
     stamp_day  = anchor.strftime("%Y-%m-%d")
     month_day  = anchor.strftime("%m/%d")
     time_label = "8:00時点" if RUN_LABEL=="AM" else ("20:00時点" if RUN_LABEL=="PM" else now_jst.strftime("%H:%M時点"))
-    label_ja   = "（朝の部）" if RUN_LABEL=="AM" else ("（夜の部）" if RUN_LABEL=="PM" else "")
 
     html = fetch_html(VOTE_URL)
     by_season = parse_votes_by_season(html)
@@ -201,10 +199,11 @@ def main():
     xlim_s2 = compute_xlim_hundred_for(top_s2)
     # =====================================
 
-    cap_s1 = f"吸死（1期） 上位{len(top_s1)}（{stamp_full} JST）{label_ja}"
-    cap_s2 = f"吸死２（2期） 上位{len(top_s2)}（{stamp_full} JST）{label_ja}"
+    # グラフタイトルは指定どおり固定文言
+    cap_s1 = "吸血鬼すぐ死ぬ　上位5位"
+    cap_s2 = "吸血鬼すぐ死ぬ２　上位5位"
 
-    # ======= Figure / Layout（上下の間を詰める。x軸は共有しない） =======
+    # ======= Figure / Layout（上下の間をちょい詰め、x軸は共有しない） =======
     try:
         fig, axes = plt.subplots(
             nrows=2, ncols=1, figsize=(10.2, 11.6), dpi=220,
@@ -250,15 +249,15 @@ def main():
     img_url = f"https://raw.githubusercontent.com/{repo}/{ref}/public/{urllib.parse.quote(fname)}"
 
     # Commit & push
-    subprocess.run(["git", "config", "user.name", "github-actions[bot]"], check=True)
+    subprocess.run(["git", "config", "user.name",  "github-actions[bot]"], check=True)
     subprocess.run(["git", "config", "user.email", "github-actions[bot]@users.noreply.github.com"], check=True)
     subprocess.run(["git", "add", str(out)], check=True)
     subprocess.run(["git", "commit", "-m", f"Add {fname}"], check=True)
     subprocess.run(["git", "push"], check=True)
 
-    # ツイート本文
+    # ツイート本文（「中間発表」に変更）
     body = (
-        f"🗳️エピソード投票中間結果発表（{month_day} {time_label}）🗳️\n"
+        f"🗳️エピソード投票中間発表（{month_day} {time_label}）🗳️\n"
         f"\n"
         f"{CAMPAIGN_PERIOD}\n"
         f"投票はこちらから（1日1回）→ https://sugushinu-anime.jp/vote/\n\n"
