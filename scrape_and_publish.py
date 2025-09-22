@@ -251,4 +251,34 @@ def main():
 
     # Commit & push
     subprocess.run(["git", "config", "user.name", "github-actions[bot]"], check=True)
-    subprocess.run(["git", "config", "user.email", "github-actions[bot]@users.noreply]()
+    subprocess.run(["git", "config", "user.email", "github-actions[bot]@users.noreply.github.com"], check=True)
+    subprocess.run(["git", "add", str(out)], check=True)
+    subprocess.run(["git", "commit", "-m", f"Add {fname}"], check=True)
+    subprocess.run(["git", "push"], check=True)
+
+    # ツイート本文
+    body = (
+        f"🗳️エピソード投票中間結果発表（{month_day} {time_label}）🗳️\n"
+        f"\n"
+        f"{CAMPAIGN_PERIOD}\n"
+        f"投票はこちらから（1日1回）→ https://sugushinu-anime.jp/vote/\n\n"
+        f"#吸血鬼すぐ死ぬ\n#吸血鬼すぐ死ぬ２\n#応援上映エッヒョッヒョ"
+    )
+
+    # IFTTT Webhooks
+    time.sleep(3)
+    key   = os.getenv("IFTTT_KEY")
+    event = os.getenv("IFTTT_EVENT")
+    if key and event:
+        url = f"https://maker.ifttt.com/trigger/{event}/with/key/{key}"
+        r = requests.post(url, json={"value1": body, "value2": img_url}, timeout=30)
+        print("IFTTT status:", r.status_code, r.text[:200])
+    else:
+        print("IFTTT_KEY/IFTTT_EVENT 未設定なので送信スキップ", file=sys.stderr)
+
+    # デバッグ出力
+    print(f"IFTTT_TEXT::{body}")
+    print(f"IFTTT_IMG::{img_url}")
+
+if __name__ == "__main__":
+    main()
