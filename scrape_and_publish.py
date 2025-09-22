@@ -106,7 +106,7 @@ def compute_xlim_hundred(top_s1, top_s2) -> int:
             mv = max(v for _, v in items)
             if mv > max_vote:
                 max_vote = mv
-    limit = ((max_vote + 200) // 100) * 100  # 530→730→700
+    limit = ((max_vote + 200) // 100) * 100  # 例: 530→730→700
     return max(200, limit)
 
 # --------- グラデ用 ----------
@@ -124,7 +124,7 @@ def _fill_rect_with_gradient(ax, rect, c0_hex: str, c1_hex: str):
     cols = 256
     t = np.linspace(0, 1, cols).reshape(1, cols, 1)
     grad = c0 + (c1 - c0) * t
-    # zorder=0 で軸・目盛りより背面へ
+    # 背面に敷く（軸・目盛りは前面）
     ax.imshow(grad, extent=[x0, x1, y0, y1], origin='lower',
               aspect='auto', interpolation='bicubic', zorder=0, clip_on=True)
 
@@ -134,32 +134,36 @@ def draw_panel(ax, items, caption, grad_from_to: tuple[str,str], fixed_xlim: int
     votes  = [int(t[1]) for t in items]
     y = list(range(len(titles)))[::-1]
 
-    # 透明バー（枠なし）→上からグラデ
+    # 透明バーにして上からグラデを貼る
     bars = ax.barh(y, votes, color='none', edgecolor='none', zorder=1)
     for rect in bars:
         _fill_rect_with_gradient(ax, rect, grad_from_to[0], grad_from_to[1])
 
-    # 軸まわり
-    ax.set_yticks(y)
-    ax.set_yticklabels(titles, color='black')
-    ax.set_title(caption, color='black')
+    # --- x方向（左右）は従来どおり ---
     ax.set_xlim(0, fixed_xlim)
-
-    # x目盛りを明示 & 黒で固定（消え対策）
     xticks = np.arange(0, fixed_xlim + 1, 100)
     ax.set_xticks(xticks)
     ax.tick_params(axis='x', colors='black')
     ax.tick_params(axis='y', colors='black')
-
-    ax.set_axisbelow(True)                  # グリッドを背面へ
+    ax.set_axisbelow(True)
     ax.xaxis.grid(True, linestyle=":", alpha=0.3, zorder=0)
     if show_xlabel:
         ax.set_xlabel("投票数", color='black')
 
-    # 上下に少し余白（タイトル/ラベル食われ防止）
-    ax.margins(y=0.10)
+    ax.set_yticks(y)
+    ax.set_yticklabels(titles, color='black')
+    ax.set_title(caption, color='black')
 
-    # 票数だけ大きく & 右端クランプ
+    # ===== 上下だけ余白を入れる =====
+    # y は [4,3,2,1,0] のように降順。各バーの高さは1.0なので ±0.5 がバー端。
+    top_pad = 0.6       # 上側余白（バー高さ基準）
+    bottom_pad = 0.6    # 下側余白
+    ymin = min(y) - 0.5 - bottom_pad
+    ymax = max(y) + 0.5 + top_pad
+    ax.set_ylim(ymin, ymax)
+    # ============================
+
+    # 票数ラベル（右端クランプ）
     pad = fixed_xlim * 0.02
     for bar, v in zip(bars, votes):
         x = min(bar.get_width() + pad, fixed_xlim - pad * 0.5)
@@ -198,33 +202,44 @@ def main():
     except TypeError:
         fig, axes = plt.subplots(nrows=2, ncols=1, figsize=(10.5, 12), dpi=220, sharex=True)
         fig.tight_layout(rect=(0.06, 0.06, 0.98, 0.98))
-    # パネル間の間隔
     try:
         fig.set_constrained_layout_pads(w_pad=0.5, h_pad=0.6, hspace=0.25, wspace=0.2)
     except Exception:
         pass
 
-    # 1期：黄色→オレンジ / 2期：ピンク→紫
-    draw_panel(axes[0], top_s1, cap_s1, grad_from_to=("#ffeb3b", "#fb8c00"), fixed_xlim=fixed_xlim, show_xlabel=False)
-    draw_panel(axes[1], top_s2, cap_s2, grad_from_to=("#f48fb1", "#7e57c2"),   fixed_xlim=fixed_xlim, show_xlabel=True)
+    # ======= カラー設定（指定どおり） =======
+    color_s1_left  = "#FFFF00"  # 1期 左端
+    color_s1_right = "#FF8A00"  # 1期 右端
+    color_s2_left  = "#FE2E82"  # 2期 左端
+    color_s2_right = "#4F287D"  # 2期 右端
+    # =====================================
+
+    draw_panel(axes[0], top_s1, cap_s1,
+               grad_from_to=(color_s1_left, color_s1_right),
+               fixed_xlim=fixed_xlim, show_xlabel=False)
+    draw_panel(axes[1], top_s2, cap_s2,
+               grad_from_to=(color_s2_left, color_s2_right),
+               fixed_xlim=fixed_xlim, show_xlabel=True)
 
     PUBLIC_DIR.mkdir(exist_ok=True)
     fname = f"ranking_S1S2Top{TOP_N}_{stamp_day}_{RUN_LABEL or 'RUN'}.png"
     out   = PUBLIC_DIR / fname
-    # tight で確実に全部入れる
-    fig.savefig(out, format="png", dpi=220, bbox_inches="tight", pad_inches=0.2)
+    # 余白保持のため bbox_inches=tight で軽くパディング
+    plt.savefig(out, format="png", dpi=220, bbox_inches="tight", pad_inches=0.2)
     plt.close(fig)
 
     repo = os.getenv("GITHUB_REPOSITORY")
     ref  = os.getenv("GITHUB_REF_NAME", "main")
     img_url = f"https://raw.githubusercontent.com/{repo}/{ref}/public/{urllib.parse.quote(fname)}"
 
+    # Commit & push
     subprocess.run(["git", "config", "user.name", "github-actions[bot]"], check=True)
     subprocess.run(["git", "config", "user.email", "github-actions[bot]@users.noreply.github.com"], check=True)
     subprocess.run(["git", "add", str(out)], check=True)
     subprocess.run(["git", "commit", "-m", f"Add {fname}"], check=True)
     subprocess.run(["git", "push"], check=True)
 
+    # ツイート本文
     body = (
         f"🗳️エピソード投票中間結果発表（{month_day} {time_label}）🗳️\n"
         f"\n"
