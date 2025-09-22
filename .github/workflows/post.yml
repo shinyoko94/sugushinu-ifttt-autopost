@@ -1,41 +1,51 @@
-name: Vote → IFTTT auto-post (2x daily)
+name: Vote → IFTTT auto-post
 
 on:
-  schedule:
-    - cron: "0 23 * * *"  # JST 08:00
-    - cron: "0 11 * * *"  # JST 20:00
-  workflow_dispatch: {}
+  workflow_dispatch: {}   # ← GAS から起動
 
 permissions:
   contents: write
 
+concurrency:
+  group: vote-ifttt
+  cancel-in-progress: true
+
 jobs:
   run:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: true
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: sudo apt-get update && sudo apt-get install -y fonts-noto-cjk
-      - run: |
-          if [ -f requirements.txt ]; then
-            pip install -r requirements.txt
+          cache: "pip"
+
+      - name: Install deps (minimal)
+        run: |
+          pip install --upgrade pip
+          pip install requests beautifulsoup4 matplotlib lxml pillow
+
+      # 実行時のJSTで AM/PM を判定
+      - name: Set RUN_LABEL by JST hour
+        run: |
+          export TZ=Asia/Tokyo
+          h=$(date +%H)
+          if [ "$h" = "08" ]; then
+            echo "RUN_LABEL=AM" >> $GITHUB_ENV
+          elif [ "$h" = "20" ]; then
+            echo "RUN_LABEL=PM" >> $GITHUB_ENV
           else
-            pip install requests beautifulsoup4 matplotlib lxml pillow
-          fi
-      - name: AM run vars
-        if: ${{ github.event.schedule == '0 23 * * *' }}
-        run: echo "RUN_LABEL=AM" >> $GITHUB_ENV
-      - name: PM run vars
-        if: ${{ github.event.schedule == '0 11 * * *' }}
-        run: echo "RUN_LABEL=PM" >> $GITHUB_ENV
+            echo "RUN_LABEL=" >> $GITHUB_ENV
+
       - name: Scrape → Image → Commit → IFTTT
         env:
           TOP_N: "5"
           IFTTT_KEY: ${{ secrets.IFTTT_KEY }}
           IFTTT_EVENT: ${{ secrets.IFTTT_EVENT }}
           RUN_LABEL: ${{ env.RUN_LABEL }}
-        run: python scrape_and_publish.py
+        run: |
+          python scrape_and_publish.py
