@@ -9,14 +9,11 @@ import numpy as np
 def ensure_custom_font():
     from matplotlib import font_manager
     preferred = None
-    # リポに同梱してる場合は最優先
     try:
         target = "fonts/GenEiMGothic2-Bold.ttf"
         if os.path.isfile(target):
             font_manager.fontManager.addfont(target)
             preferred = font_manager.FontProperties(fname=target).get_name()
-            print(f"Loaded font: {preferred}")
-        # 追加フォントも拾う
         for p in glob.glob("fonts/**/*.[ot]tf", recursive=True) + glob.glob("fonts/*.[ot]tf"):
             try:
                 if os.path.abspath(p) != os.path.abspath(target):
@@ -26,22 +23,17 @@ def ensure_custom_font():
     except Exception as e:
         print("font warn:", e, file=sys.stderr)
 
-    # ランナーに入れた Noto を最優先 → あればGenEi → 既定
     rcParams["font.family"] = "sans-serif"
     rcParams["font.sans-serif"] = [
-        "Noto Sans CJK JP",
-        "Noto Sans CJK JP Regular",
+        "Noto Sans CJK JP", "Noto Sans CJK JP Regular"
     ] + ([preferred] if preferred else []) + [
-        "GenEiMGothic2", "GenEiMGothic2-Bold",
-        "DejaVu Sans",
+        "GenEiMGothic2", "GenEiMGothic2-Bold", "DejaVu Sans",
     ]
-    rcParams["axes.unicode_minus"] = False  # マイナス記号
-
-    # ベースサイズ
-    rcParams["xtick.labelsize"] = 11
-    rcParams["ytick.labelsize"] = 12
+    rcParams["axes.unicode_minus"] = False
     rcParams["axes.titlesize"] = 14
     rcParams["axes.labelsize"] = 11
+    rcParams["xtick.labelsize"] = 11
+    rcParams["ytick.labelsize"] = 12
 
 ensure_custom_font()
 # =================================================
@@ -117,12 +109,12 @@ def compute_xlim_hundred(top_s1, top_s2) -> int:
     limit = ((max_vote + 200) // 100) * 100  # 530→730→700
     return max(200, limit)
 
-# --------- グラデ用ユーティリティ ---------
+# --------- グラデ用 ----------
 def _hex_to_rgb01(hx: str):
     hx = hx.lstrip('#')
-    return (int(hx[0:2], 16)/255.0, int(hx[2:4], 16)/255.0, int(hx[4:6], 16)/255.0)
+    return (int(hx[0:2],16)/255.0, int(hx[2:4],16)/255.0, int(hx[4:6],16)/255.0)
 
-def _fill_rect_with_gradient(ax, rect, c0_hex: str, c1_hex: str, zorder=2):
+def _fill_rect_with_gradient(ax, rect, c0_hex: str, c1_hex: str):
     x0, y0 = rect.get_x(), rect.get_y()
     w, h = rect.get_width(), rect.get_height()
     if w <= 0 or h <= 0: return
@@ -132,38 +124,49 @@ def _fill_rect_with_gradient(ax, rect, c0_hex: str, c1_hex: str, zorder=2):
     cols = 256
     t = np.linspace(0, 1, cols).reshape(1, cols, 1)
     grad = c0 + (c1 - c0) * t
+    # zorder=0 で軸・目盛りより背面へ
     ax.imshow(grad, extent=[x0, x1, y0, y1], origin='lower',
-              aspect='auto', interpolation='bicubic', zorder=zorder, clip_on=True)
+              aspect='auto', interpolation='bicubic', zorder=0, clip_on=True)
 
-# --------- 描画 ---------
-def draw_panel(ax, items, caption, grad_from_to: tuple[str, str], fixed_xlim: int, show_xlabel=False):
+# --------- 描画 ----------
+def draw_panel(ax, items, caption, grad_from_to: tuple[str,str], fixed_xlim: int, show_xlabel=False):
     titles = [f"{i+1}. {_wrap(t[0])}" for i, t in enumerate(items)]
     votes  = [int(t[1]) for t in items]
     y = list(range(len(titles)))[::-1]
 
-    # ベースbarは透明（グラデを上から貼る）
-    bars = ax.barh(y, votes, color='none', edgecolor='none')
-
+    # 透明バー（枠なし）→上からグラデ
+    bars = ax.barh(y, votes, color='none', edgecolor='none', zorder=1)
     for rect in bars:
-        _fill_rect_with_gradient(ax, rect, grad_from_to[0], grad_from_to[1], zorder=2)
+        _fill_rect_with_gradient(ax, rect, grad_from_to[0], grad_from_to[1])
 
+    # 軸まわり
     ax.set_yticks(y)
-    ax.set_yticklabels(titles)
-    if show_xlabel:
-        ax.set_xlabel("投票数")
-    ax.set_title(caption)
-    ax.xaxis.grid(True, linestyle=":", alpha=0.3)
+    ax.set_yticklabels(titles, color='black')
+    ax.set_title(caption, color='black')
     ax.set_xlim(0, fixed_xlim)
 
-    # 大きい票数テキスト（22pt）＋右端オーバー防止
+    # x目盛りを明示 & 黒で固定（消え対策）
+    xticks = np.arange(0, fixed_xlim + 1, 100)
+    ax.set_xticks(xticks)
+    ax.tick_params(axis='x', colors='black')
+    ax.tick_params(axis='y', colors='black')
+
+    ax.set_axisbelow(True)                  # グリッドを背面へ
+    ax.xaxis.grid(True, linestyle=":", alpha=0.3, zorder=0)
+    if show_xlabel:
+        ax.set_xlabel("投票数", color='black')
+
+    # 上下に少し余白（タイトル/ラベル食われ防止）
+    ax.margins(y=0.10)
+
+    # 票数だけ大きく & 右端クランプ
     pad = fixed_xlim * 0.02
     for bar, v in zip(bars, votes):
         x = min(bar.get_width() + pad, fixed_xlim - pad * 0.5)
         ax.text(x, bar.get_y() + bar.get_height()/2, f"{v:,}",
-                va="center", ha="left", fontsize=22, zorder=3)
+                va="center", ha="left", fontsize=22, color='black', zorder=2)
 
 def main():
-    # 停止判定：指定時刻“より後”はスキップ（当回は投稿）
     now_jst = dt.datetime.now(dt.timezone(dt.timedelta(hours=9)))
     if now_jst > STOP_AT_JST:
         print(f"STOP: {now_jst} > {STOP_AT_JST} なので投稿スキップ")
@@ -183,39 +186,45 @@ def main():
 
     top_s1 = pick_top(by_season["S1"], TOP_N)
     top_s2 = pick_top(by_season["S2"], TOP_N)
-
     fixed_xlim = compute_xlim_hundred(top_s1, top_s2)
 
     cap_s1 = f"吸死（1期） 上位{len(top_s1)}（{stamp_full} JST）{label_ja}"
     cap_s2 = f"吸死２（2期） 上位{len(top_s2)}（{stamp_full} JST）{label_ja}"
 
-    # 余白を広めに（左を厚め、上も余裕）
-    fig, axes = plt.subplots(nrows=2, ncols=1, figsize=(10, 12), dpi=220, sharex=True)
-    fig.subplots_adjust(left=0.40, right=0.98, top=0.93, bottom=0.10, hspace=0.30)
+    # 自動レイアウト（新）＋フォールバック
+    try:
+        fig, axes = plt.subplots(nrows=2, ncols=1, figsize=(10.5, 12), dpi=220,
+                                 sharex=True, layout='constrained')
+    except TypeError:
+        fig, axes = plt.subplots(nrows=2, ncols=1, figsize=(10.5, 12), dpi=220, sharex=True)
+        fig.tight_layout(rect=(0.06, 0.06, 0.98, 0.98))
+    # パネル間の間隔
+    try:
+        fig.set_constrained_layout_pads(w_pad=0.5, h_pad=0.6, hspace=0.25, wspace=0.2)
+    except Exception:
+        pass
 
     # 1期：黄色→オレンジ / 2期：ピンク→紫
     draw_panel(axes[0], top_s1, cap_s1, grad_from_to=("#ffeb3b", "#fb8c00"), fixed_xlim=fixed_xlim, show_xlabel=False)
-    draw_panel(axes[1], top_s2, cap_s2, grad_from_to=("#f48fb1", "#7e57c2"), fixed_xlim=fixed_xlim, show_xlabel=True)
+    draw_panel(axes[1], top_s2, cap_s2, grad_from_to=("#f48fb1", "#7e57c2"),   fixed_xlim=fixed_xlim, show_xlabel=True)
 
     PUBLIC_DIR.mkdir(exist_ok=True)
     fname = f"ranking_S1S2Top{TOP_N}_{stamp_day}_{RUN_LABEL or 'RUN'}.png"
     out   = PUBLIC_DIR / fname
-    # クリップ防止のため余白そのまま保存（tightは使わない）
-    fig.savefig(out, format="png", dpi=220)
+    # tight で確実に全部入れる
+    fig.savefig(out, format="png", dpi=220, bbox_inches="tight", pad_inches=0.2)
     plt.close(fig)
 
     repo = os.getenv("GITHUB_REPOSITORY")
     ref  = os.getenv("GITHUB_REF_NAME", "main")
     img_url = f"https://raw.githubusercontent.com/{repo}/{ref}/public/{urllib.parse.quote(fname)}"
 
-    # Git commit & push
     subprocess.run(["git", "config", "user.name", "github-actions[bot]"], check=True)
     subprocess.run(["git", "config", "user.email", "github-actions[bot]@users.noreply.github.com"], check=True)
     subprocess.run(["git", "add", str(out)], check=True)
     subprocess.run(["git", "commit", "-m", f"Add {fname}"], check=True)
     subprocess.run(["git", "push"], check=True)
 
-    # ツイート本文（見出しの直後に空行）
     body = (
         f"🗳️エピソード投票中間結果発表（{month_day} {time_label}）🗳️\n"
         f"\n"
@@ -224,10 +233,7 @@ def main():
         f"#吸血鬼すぐ死ぬ\n#吸血鬼すぐ死ぬ２\n#応援上映エッヒョッヒョ"
     )
 
-    # 生URLの反映ラグ対策
     time.sleep(3)
-
-    # IFTTT
     key   = os.getenv("IFTTT_KEY")
     event = os.getenv("IFTTT_EVENT")
     if key and event:
