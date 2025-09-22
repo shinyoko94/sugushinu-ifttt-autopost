@@ -1,7 +1,7 @@
 name: Vote → IFTTT auto-post
 
 on:
-  workflow_dispatch: {}   # ← GAS から起動
+  workflow_dispatch: {}   # GASなど外部から起動
 
 permissions:
   contents: write
@@ -14,24 +14,29 @@ jobs:
   run:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
           persist-credentials: true
 
-      - uses: actions/setup-python@v5
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: "pip"
 
       - name: Install deps (minimal)
         run: |
+          python -V
           pip install --upgrade pip
-          pip install requests beautifulsoup4 matplotlib lxml pillow
+          pip install requests beautifulsoup4 matplotlib lxml pillow numpy
 
-      # 実行時のJSTで AM/PM を判定
       - name: Set RUN_LABEL by JST hour
+        shell: bash
         run: |
+          set -e
           export TZ=Asia/Tokyo
           h=$(date +%H)
           if [ "$h" = "08" ]; then
@@ -40,6 +45,8 @@ jobs:
             echo "RUN_LABEL=PM" >> $GITHUB_ENV
           else
             echo "RUN_LABEL=" >> $GITHUB_ENV
+          fi
+          echo "RUN_LABEL -> '${RUN_LABEL:-(empty)}'"
 
       - name: Scrape → Image → Commit → IFTTT
         env:
