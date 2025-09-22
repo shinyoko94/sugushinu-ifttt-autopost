@@ -34,7 +34,7 @@ def ensure_custom_font():
     rcParams["axes.unicode_minus"] = False
     # 可読性
     rcParams["axes.titlesize"] = 14
-    rcParams["axes.labelsize"] = 12
+    rcParams["axes.labelsize"]  = 12
     rcParams["xtick.labelsize"] = 12
     rcParams["ytick.labelsize"] = 12
 
@@ -102,15 +102,12 @@ def anchor_time_jst(now_jst: dt.datetime, run_label: str) -> dt.datetime:
         return dt.datetime(d.year, d.month, d.day, 20, 0, 0, tzinfo=tz)
     return now_jst
 
-# x軸最大：最多+200 → 下2桁00（最低 200）
-def compute_xlim_hundred(top_s1, top_s2) -> int:
-    max_vote = 0
-    for items in (top_s1, top_s2):
-        if items:
-            mv = max(v for _, v in items)
-            if mv > max_vote:
-                max_vote = mv
-    limit = ((max_vote + 200) // 100) * 100  # 例: 530→730→700
+# x軸最大：最多+200 → 下2桁00（最低 200）※期ごと
+def compute_xlim_hundred_for(items) -> int:
+    if not items:
+        return 200
+    mv = max(v for _, v in items)
+    limit = ((mv + 200) // 100) * 100  # 例: 530→730→700
     return max(200, limit)
 
 # ----------------- Gradient helpers -----------------
@@ -145,7 +142,7 @@ def draw_panel(ax, items, caption, grad_from_to: tuple[str,str], fixed_xlim: int
     for rect in bars:
         _fill_rect_with_gradient(ax, rect, grad_from_to[0], grad_from_to[1])
 
-    # x方向
+    # x方向（個別の上限）
     ax.set_xlim(0, fixed_xlim)
     xticks = np.arange(0, fixed_xlim + 1, 100)
     ax.set_xticks(xticks)
@@ -198,21 +195,24 @@ def main():
 
     top_s1 = pick_top(by_season["S1"], TOP_N)
     top_s2 = pick_top(by_season["S2"], TOP_N)
-    fixed_xlim = compute_xlim_hundred(top_s1, top_s2)
+
+    # ======= 期ごとのxlimを個別に算出 =======
+    xlim_s1 = compute_xlim_hundred_for(top_s1)
+    xlim_s2 = compute_xlim_hundred_for(top_s2)
+    # =====================================
 
     cap_s1 = f"吸死（1期） 上位{len(top_s1)}（{stamp_full} JST）{label_ja}"
     cap_s2 = f"吸死２（2期） 上位{len(top_s2)}（{stamp_full} JST）{label_ja}"
 
-    # ======= Figure / Layout（間隔を詰めつつ、sharex） =======
+    # ======= Figure / Layout（上下の間を詰める。x軸は共有しない） =======
     try:
         fig, axes = plt.subplots(
             nrows=2, ncols=1, figsize=(10.2, 11.6), dpi=220,
-            sharex=True, layout='constrained'
+            sharex=False, layout='constrained'
         )
-        # 上下の隙間を小さめに
         fig.set_constrained_layout_pads(w_pad=0.4, h_pad=0.12, hspace=0.02, wspace=0.2)
     except TypeError:
-        fig, axes = plt.subplots(nrows=2, ncols=1, figsize=(10.2, 11.6), dpi=220, sharex=True)
+        fig, axes = plt.subplots(nrows=2, ncols=1, figsize=(10.2, 11.6), dpi=220, sharex=False)
         fig.tight_layout(rect=(0.05, 0.05, 0.98, 0.98))
 
     # ======= カラー（指定のグラデ） =======
@@ -226,16 +226,16 @@ def main():
     draw_panel(
         axes[0], top_s1, cap_s1,
         grad_from_to=(color_s1_left, color_s1_right),
-        fixed_xlim=fixed_xlim, show_xlabel=False
+        fixed_xlim=xlim_s1, show_xlabel=False
     )
+    # 上段もx目盛りは表示
+    axes[0].tick_params(axis='x', labelbottom=True)
+
     draw_panel(
         axes[1], top_s2, cap_s2,
         grad_from_to=(color_s2_left, color_s2_right),
-        fixed_xlim=fixed_xlim, show_xlabel=True
+        fixed_xlim=xlim_s2, show_xlabel=True
     )
-
-    # sharex=True だと上段のx目盛りが隠れることがあるので、明示的に表示
-    axes[0].tick_params(axis='x', labelbottom=True)
 
     # 保存
     PUBLIC_DIR.mkdir(exist_ok=True)
@@ -251,34 +251,4 @@ def main():
 
     # Commit & push
     subprocess.run(["git", "config", "user.name", "github-actions[bot]"], check=True)
-    subprocess.run(["git", "config", "user.email", "github-actions[bot]@users.noreply.github.com"], check=True)
-    subprocess.run(["git", "add", str(out)], check=True)
-    subprocess.run(["git", "commit", "-m", f"Add {fname}"], check=True)
-    subprocess.run(["git", "push"], check=True)
-
-    # ツイート本文
-    body = (
-        f"🗳️エピソード投票中間結果発表（{month_day} {time_label}）🗳️\n"
-        f"\n"
-        f"{CAMPAIGN_PERIOD}\n"
-        f"投票はこちらから（1日1回）→ https://sugushinu-anime.jp/vote/\n\n"
-        f"#吸血鬼すぐ死ぬ\n#吸血鬼すぐ死ぬ２\n#応援上映エッヒョッヒョ"
-    )
-
-    # IFTTT Webhooks
-    time.sleep(3)
-    key   = os.getenv("IFTTT_KEY")
-    event = os.getenv("IFTTT_EVENT")
-    if key and event:
-        url = f"https://maker.ifttt.com/trigger/{event}/with/key/{key}"
-        r = requests.post(url, json={"value1": body, "value2": img_url}, timeout=30)
-        print("IFTTT status:", r.status_code, r.text[:200])
-    else:
-        print("IFTTT_KEY/IFTTT_EVENT 未設定なので送信スキップ", file=sys.stderr)
-
-    # デバッグ出力
-    print(f"IFTTT_TEXT::{body}")
-    print(f"IFTTT_IMG::{img_url}")
-
-if __name__ == "__main__":
-    main()
+    subprocess.run(["git", "config", "user.email", "github-actions[bot]@users.noreply]()
