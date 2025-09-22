@@ -27,6 +27,12 @@ jobs:
           python-version: "3.11"
           cache: "pip"
 
+      # 日本語フォントを入れる（文字化け防止）
+      - name: Install Japanese fonts
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fonts-noto-cjk
+
       - name: Install deps (minimal)
         run: |
           python -V
