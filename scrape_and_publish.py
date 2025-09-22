@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import re, os, pathlib, datetime as dt, urllib.parse, subprocess, sys, textwrap, glob, time
 import requests
 from bs4 import BeautifulSoup
@@ -14,6 +15,7 @@ def ensure_custom_font():
         if os.path.isfile(target):
             font_manager.fontManager.addfont(target)
             preferred = font_manager.FontProperties(fname=target).get_name()
+        # ついでに fonts/ 配下を丸ごと登録（あれば）
         for p in glob.glob("fonts/**/*.[ot]tf", recursive=True) + glob.glob("fonts/*.[ot]tf"):
             try:
                 if os.path.abspath(p) != os.path.abspath(target):
@@ -24,15 +26,16 @@ def ensure_custom_font():
         print("font warn:", e, file=sys.stderr)
 
     rcParams["font.family"] = "sans-serif"
-    rcParams["font.sans-serif"] = [
-        "Noto Sans CJK JP", "Noto Sans CJK JP Regular"
-    ] + ([preferred] if preferred else []) + [
-        "GenEiMGothic2", "GenEiMGothic2-Bold", "DejaVu Sans",
-    ]
+    rcParams["font.sans-serif"] = (
+        ["Noto Sans CJK JP", "Noto Sans CJK JP Regular"]
+        + ([preferred] if preferred else [])
+        + ["GenEiMGothic2", "GenEiMGothic2-Bold", "DejaVu Sans"]
+    )
     rcParams["axes.unicode_minus"] = False
+    # 可読性
     rcParams["axes.titlesize"] = 14
-    rcParams["axes.labelsize"] = 11
-    rcParams["xtick.labelsize"] = 11
+    rcParams["axes.labelsize"] = 12
+    rcParams["xtick.labelsize"] = 12
     rcParams["ytick.labelsize"] = 12
 
 ensure_custom_font()
@@ -47,6 +50,7 @@ CAMPAIGN_PERIOD = "投票期間：9月19日（金）～10月3日（金）"
 STOP_AT_JST = dt.datetime(2025, 10, 2, 20, 0, 0, tzinfo=dt.timezone(dt.timedelta(hours=9)))
 TITLE_PREFIXES = ["吸血鬼すぐ死ぬ", "吸血鬼すぐ死ぬ２"]
 
+# ----------------- HTML & Parse -----------------
 def fetch_html(url: str) -> str:
     r = requests.get(url, timeout=30, headers={"User-Agent":"Mozilla/5.0"})
     r.raise_for_status()
@@ -109,7 +113,7 @@ def compute_xlim_hundred(top_s1, top_s2) -> int:
     limit = ((max_vote + 200) // 100) * 100  # 例: 530→730→700
     return max(200, limit)
 
-# --------- グラデ用 ----------
+# ----------------- Gradient helpers -----------------
 def _hex_to_rgb01(hx: str):
     hx = hx.lstrip('#')
     return (int(hx[0:2],16)/255.0, int(hx[2:4],16)/255.0, int(hx[4:6],16)/255.0)
@@ -117,18 +121,20 @@ def _hex_to_rgb01(hx: str):
 def _fill_rect_with_gradient(ax, rect, c0_hex: str, c1_hex: str):
     x0, y0 = rect.get_x(), rect.get_y()
     w, h = rect.get_width(), rect.get_height()
-    if w <= 0 or h <= 0: return
+    if w <= 0 or h <= 0:
+        return
     x1, y1 = x0 + w, y0 + h
     c0 = np.array(_hex_to_rgb01(c0_hex))
     c1 = np.array(_hex_to_rgb01(c1_hex))
     cols = 256
     t = np.linspace(0, 1, cols).reshape(1, cols, 1)
     grad = c0 + (c1 - c0) * t
-    # 背面に敷く（軸・目盛りは前面）
-    ax.imshow(grad, extent=[x0, x1, y0, y1], origin='lower',
-              aspect='auto', interpolation='bicubic', zorder=0, clip_on=True)
+    ax.imshow(
+        grad, extent=[x0, x1, y0, y1], origin='lower',
+        aspect='auto', interpolation='bicubic', zorder=0, clip_on=True
+    )
 
-# --------- 描画 ----------
+# ----------------- Draw panel -----------------
 def draw_panel(ax, items, caption, grad_from_to: tuple[str,str], fixed_xlim: int, show_xlabel=False):
     titles = [f"{i+1}. {_wrap(t[0])}" for i, t in enumerate(items)]
     votes  = [int(t[1]) for t in items]
@@ -139,7 +145,7 @@ def draw_panel(ax, items, caption, grad_from_to: tuple[str,str], fixed_xlim: int
     for rect in bars:
         _fill_rect_with_gradient(ax, rect, grad_from_to[0], grad_from_to[1])
 
-    # --- x方向（左右）は従来どおり ---
+    # x方向
     ax.set_xlim(0, fixed_xlim)
     xticks = np.arange(0, fixed_xlim + 1, 100)
     ax.set_xticks(xticks)
@@ -154,22 +160,24 @@ def draw_panel(ax, items, caption, grad_from_to: tuple[str,str], fixed_xlim: int
     ax.set_yticklabels(titles, color='black')
     ax.set_title(caption, color='black')
 
-    # ===== 上下だけ余白を入れる =====
-    # y は [4,3,2,1,0] のように降順。各バーの高さは1.0なので ±0.5 がバー端。
-    top_pad = 0.6       # 上側余白（バー高さ基準）
-    bottom_pad = 0.6    # 下側余白
+    # ===== 上下だけ余白を入れる（バー端が枠に当たらないように）=====
+    top_pad = 0.6
+    bottom_pad = 0.6
     ymin = min(y) - 0.5 - bottom_pad
     ymax = max(y) + 0.5 + top_pad
     ax.set_ylim(ymin, ymax)
-    # ============================
+    # ============================================================
 
-    # 票数ラベル（右端クランプ）
+    # 票数ラベル（右端はみ出し防止でクランプ）
     pad = fixed_xlim * 0.02
     for bar, v in zip(bars, votes):
         x = min(bar.get_width() + pad, fixed_xlim - pad * 0.5)
-        ax.text(x, bar.get_y() + bar.get_height()/2, f"{v:,}",
-                va="center", ha="left", fontsize=22, color='black', zorder=2)
+        ax.text(
+            x, bar.get_y() + bar.get_height()/2, f"{v:,}",
+            va="center", ha="left", fontsize=22, color='black', zorder=2
+        )
 
+# ----------------- Main -----------------
 def main():
     now_jst = dt.datetime.now(dt.timezone(dt.timedelta(hours=9)))
     if now_jst > STOP_AT_JST:
@@ -195,39 +203,48 @@ def main():
     cap_s1 = f"吸死（1期） 上位{len(top_s1)}（{stamp_full} JST）{label_ja}"
     cap_s2 = f"吸死２（2期） 上位{len(top_s2)}（{stamp_full} JST）{label_ja}"
 
-    # 自動レイアウト（新）＋フォールバック
+    # ======= Figure / Layout（間隔を詰めつつ、sharex） =======
     try:
-        fig, axes = plt.subplots(nrows=2, ncols=1, figsize=(10.5, 12), dpi=220,
-                                 sharex=True, layout='constrained')
+        fig, axes = plt.subplots(
+            nrows=2, ncols=1, figsize=(10.2, 11.6), dpi=220,
+            sharex=True, layout='constrained'
+        )
+        # 上下の隙間を小さめに
+        fig.set_constrained_layout_pads(w_pad=0.4, h_pad=0.12, hspace=0.02, wspace=0.2)
     except TypeError:
-        fig, axes = plt.subplots(nrows=2, ncols=1, figsize=(10.5, 12), dpi=220, sharex=True)
-        fig.tight_layout(rect=(0.06, 0.06, 0.98, 0.98))
-    try:
-        fig.set_constrained_layout_pads(w_pad=0.5, h_pad=0.6, hspace=0.25, wspace=0.2)
-    except Exception:
-        pass
+        fig, axes = plt.subplots(nrows=2, ncols=1, figsize=(10.2, 11.6), dpi=220, sharex=True)
+        fig.tight_layout(rect=(0.05, 0.05, 0.98, 0.98))
 
-    # ======= カラー設定（指定どおり） =======
-    color_s1_left  = "#FFFF00"  # 1期 左端
-    color_s1_right = "#FF8A00"  # 1期 右端
-    color_s2_left  = "#FE2E82"  # 2期 左端
-    color_s2_right = "#4F287D"  # 2期 右端
+    # ======= カラー（指定のグラデ） =======
+    color_s1_left  = "#FFFF00"  # 黄色
+    color_s1_right = "#FF8A00"  # オレンジ
+    color_s2_left  = "#FE2E82"  # ピンク
+    color_s2_right = "#4F287D"  # 紫
     # =====================================
 
-    draw_panel(axes[0], top_s1, cap_s1,
-               grad_from_to=(color_s1_left, color_s1_right),
-               fixed_xlim=fixed_xlim, show_xlabel=False)
-    draw_panel(axes[1], top_s2, cap_s2,
-               grad_from_to=(color_s2_left, color_s2_right),
-               fixed_xlim=fixed_xlim, show_xlabel=True)
+    # 1期（上）・2期（下）
+    draw_panel(
+        axes[0], top_s1, cap_s1,
+        grad_from_to=(color_s1_left, color_s1_right),
+        fixed_xlim=fixed_xlim, show_xlabel=False
+    )
+    draw_panel(
+        axes[1], top_s2, cap_s2,
+        grad_from_to=(color_s2_left, color_s2_right),
+        fixed_xlim=fixed_xlim, show_xlabel=True
+    )
 
+    # sharex=True だと上段のx目盛りが隠れることがあるので、明示的に表示
+    axes[0].tick_params(axis='x', labelbottom=True)
+
+    # 保存
     PUBLIC_DIR.mkdir(exist_ok=True)
     fname = f"ranking_S1S2Top{TOP_N}_{stamp_day}_{RUN_LABEL or 'RUN'}.png"
     out   = PUBLIC_DIR / fname
-    # 余白保持のため bbox_inches=tight で軽くパディング
-    plt.savefig(out, format="png", dpi=220, bbox_inches="tight", pad_inches=0.2)
+    plt.savefig(out, format="png", dpi=220, bbox_inches="tight", pad_inches=0.15)
     plt.close(fig)
 
+    # 画像URL（raw）
     repo = os.getenv("GITHUB_REPOSITORY")
     ref  = os.getenv("GITHUB_REF_NAME", "main")
     img_url = f"https://raw.githubusercontent.com/{repo}/{ref}/public/{urllib.parse.quote(fname)}"
@@ -248,6 +265,7 @@ def main():
         f"#吸血鬼すぐ死ぬ\n#吸血鬼すぐ死ぬ２\n#応援上映エッヒョッヒョ"
     )
 
+    # IFTTT Webhooks
     time.sleep(3)
     key   = os.getenv("IFTTT_KEY")
     event = os.getenv("IFTTT_EVENT")
@@ -258,6 +276,7 @@ def main():
     else:
         print("IFTTT_KEY/IFTTT_EVENT 未設定なので送信スキップ", file=sys.stderr)
 
+    # デバッグ出力
     print(f"IFTTT_TEXT::{body}")
     print(f"IFTTT_IMG::{img_url}")
 
