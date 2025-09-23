@@ -1,0 +1,76 @@
+name: Vote → IFTTT auto-post (2x daily)
+run-name: vote→IFTTT auto post  # ← 各Runの行タイトルもこれで固定（任意）
+
+on:
+  workflow_dispatch:  # GAS/手動からだけ起動
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sugushinu-daily
+  cancel-in-progress: true
+
+env:
+  TZ: Asia/Tokyo
+  TOP_N: "5"
+
+jobs:
+  run-post:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Japanese fonts (Noto CJK)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fonts-noto-cjk
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests beautifulsoup4 lxml matplotlib numpy
+
+      - name: Decide RUN_LABEL by JST hour (AM/PM)
+        shell: bash
+        run: |
+          HOUR=$(date +%H)
+          if [ "$HOUR" -lt 12 ]; then LABEL=AM; else LABEL=PM; fi
+          echo "RUN_LABEL=$LABEL" >> "$GITHUB_ENV"
+          echo "RUN_LABEL=$LABEL"
+
+      - name: Run script (scrape & draw & tweet via IFTTT)
+        env:
+          IFTTT_KEY: ${{ secrets.IFTTT_KEY }}
+          IFTTT_EVENT: ${{ secrets.IFTTT_EVENT }}
+        run: |
+          python scrape_and_publish.py
+
+      # 見やすさ用（任意）
+      - name: Add run summary (list public images)
+        if: always()
+        run: |
+          echo "### Generated images in \`public/\`" >> $GITHUB_STEP_SUMMARY
+          if [ -d public ]; then
+            ls -lh public | sed 's/^/ - /' >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- (no public dir)" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Upload result image(s) as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: result-${{ env.RUN_LABEL }}-${{ github.run_id }}
+          path: public/*.png
+          if-no-files-found: warn
+          retention-days: 7
