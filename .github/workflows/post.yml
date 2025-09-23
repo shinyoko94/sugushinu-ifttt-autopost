@@ -1,7 +1,7 @@
 name: Vote → IFTTT auto-post (2x daily)
 
 on:
-  workflow_dispatch:  # GASからだけ起動
+  workflow_dispatch:  # ← GASからだけ起動
 
 permissions:
   contents: write     # 画像をコミット/プッシュするため
@@ -11,8 +11,8 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  TZ: Asia/Tokyo
-  TOP_N: "5"
+  TZ: Asia/Tokyo      # ジョブ内の時刻をJSTに
+  TOP_N: "5"          # 上位5を描画（必要なら変更OK）
 
 jobs:
   run-post:
@@ -20,9 +20,9 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 0  # 念のため
 
       - name: Install Japanese fonts (Noto CJK)
         run: |
@@ -40,8 +40,9 @@ jobs:
           pip install requests beautifulsoup4 lxml matplotlib numpy
 
       - name: Decide RUN_LABEL by JST hour (AM/PM)
+        shell: bash
         run: |
-          HOUR=$(TZ=Asia/Tokyo date +%H)
+          HOUR=$(date +%H)
           if [ "$HOUR" -lt 12 ]; then LABEL=AM; else LABEL=PM; fi
           echo "RUN_LABEL=$LABEL" >> "$GITHUB_ENV"
           echo "RUN_LABEL=$LABEL"
@@ -53,7 +54,7 @@ jobs:
         run: |
           python scrape_and_publish.py
 
-      - name: List public dir (debug)
+      - name: Show latest image (optional)
         if: always()
         run: |
           ls -lah public || true
