@@ -1,64 +1,60 @@
-name: Vote → IFTTT auto-post
+name: Vote → IFTTT auto-post (2x daily)
 
 on:
-  workflow_dispatch: {}   # GASなど外部から起動
+  workflow_dispatch:  # ← GASからだけ起動
 
 permissions:
-  contents: write
+  contents: write     # 画像をコミット/プッシュするため
 
 concurrency:
-  group: vote-ifttt
+  group: sugushinu-daily
   cancel-in-progress: true
 
+env:
+  TZ: Asia/Tokyo      # ジョブ内の時刻をJSTに
+  TOP_N: "5"          # 上位5を描画（必要なら変更OK）
+
 jobs:
-  run:
+  run-post:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
-          persist-credentials: true
+          fetch-depth: 0  # 念のため
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: "pip"
-
-      # 日本語フォントを入れる（文字化け防止）
-      - name: Install Japanese fonts
+      - name: Install Japanese fonts (Noto CJK)
         run: |
           sudo apt-get update
           sudo apt-get install -y fonts-noto-cjk
 
-      - name: Install deps (minimal)
-        run: |
-          python -V
-          pip install --upgrade pip
-          pip install requests beautifulsoup4 matplotlib lxml pillow numpy
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
-      - name: Set RUN_LABEL by JST hour
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests beautifulsoup4 lxml matplotlib numpy
+
+      - name: Decide RUN_LABEL by JST hour (AM/PM)
         shell: bash
         run: |
-          set -e
-          export TZ=Asia/Tokyo
-          h=$(date +%H)
-          if [ "$h" = "08" ]; then
-            echo "RUN_LABEL=AM" >> $GITHUB_ENV
-          elif [ "$h" = "20" ]; then
-            echo "RUN_LABEL=PM" >> $GITHUB_ENV
-          else
-            echo "RUN_LABEL=" >> $GITHUB_ENV
-          fi
-          echo "RUN_LABEL -> '${RUN_LABEL:-(empty)}'"
+          HOUR=$(date +%H)
+          if [ "$HOUR" -lt 12 ]; then LABEL=AM; else LABEL=PM; fi
+          echo "RUN_LABEL=$LABEL" >> "$GITHUB_ENV"
+          echo "RUN_LABEL=$LABEL"
 
-      - name: Scrape → Image → Commit → IFTTT
+      - name: Run script (scrape & draw & tweet via IFTTT)
         env:
-          TOP_N: "5"
           IFTTT_KEY: ${{ secrets.IFTTT_KEY }}
           IFTTT_EVENT: ${{ secrets.IFTTT_EVENT }}
-          RUN_LABEL: ${{ env.RUN_LABEL }}
         run: |
           python scrape_and_publish.py
+
+      - name: Show latest image (optional)
+        if: always()
+        run: |
+          ls -lah public || true
