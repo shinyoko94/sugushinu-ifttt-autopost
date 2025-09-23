@@ -1,5 +1,5 @@
 name: Vote → IFTTT auto-post (2x daily)
-run-name: vote→IFTTT auto post  # ← 各Runの行タイトルもこれで固定（任意）
+run-name: Vote → IFTTT auto-post (2x daily)  # ← 各Runの行タイトルもこれで固定（任意）
 
 on:
   workflow_dispatch:  # GAS/手動からだけ起動
@@ -13,7 +13,6 @@ concurrency:
 
 env:
   TZ: Asia/Tokyo
-  TOP_N: "5"
 
 jobs:
   run-post:
