@@ -2,10 +2,10 @@
 """
 sugushinu vote → image (Top 5) → commit → IFTTT
 - 1期/2期をそれぞれ上位5位で描画
-- x軸最大は「各期の最多票 × 1.2」を下二桁切り捨て（100刻みで切り下げ）、下限200
+- x軸最大は「各期の最多票 × 1.5」を下二桁切り捨て（100刻みで切り下げ）、下限200
 - タイトルは2行まで。以降は「…」
 - 1期: 黄→橙、2期: 桃→紫 の横向きグラデ棒
-- RUN_LABEL(AM/PM) によってツイート文の時刻を 8:00 / 20:00 表記
+- RUN_LABEL(AM/PM) のときは、IFTTT送信前に 8:00 / 20:00 まで待機して厳密時刻以降に投稿
 - public/ に保存 → 画像をコミット＆プッシュ → IFTTTへ送信（value1=本文, value2=画像URL）
 """
 
@@ -100,6 +100,9 @@ def _wrap(s: str, width: int = 18, max_lines: int = 2) -> str:
 def pick_top(items, n=5):
     return sorted(items, key=lambda x: (-x[1], x[0]))[:n]
 
+def jst_now():
+    return dt.datetime.now(dt.timezone(dt.timedelta(hours=9)))
+
 def anchor_time_jst(now_jst: dt.datetime, run_label: str) -> dt.datetime:
     tz = dt.timezone(dt.timedelta(hours=9))
     d = now_jst.date()
@@ -109,14 +112,26 @@ def anchor_time_jst(now_jst: dt.datetime, run_label: str) -> dt.datetime:
         return dt.datetime(d.year, d.month, d.day, 20, 0, 0, tzinfo=tz)
     return now_jst
 
-# x軸最大：最多票×1.2 を100刻みで切り下げ（下二桁切り捨て）・最低200
-def compute_xlim_120pct_floorhundred(items) -> int:
+# x軸最大：最多票×1.5 を100刻みで切り下げ（下二桁切り捨て）・最低200
+def compute_xlim_150pct_floorhundred(items) -> int:
     if not items:
         return 200
     mv = max(v for _, v in items)
-    x = int(mv * 1.2)
+    x = int(mv * 1.5)
     x -= x % 100
     return max(200, x)
+
+# 投稿時刻ガード：目標時刻まで待機（最大15分）
+def wait_until(target: dt.datetime, max_wait_seconds: int = 15 * 60):
+    now = jst_now()
+    if now >= target:
+        return
+    remaining = (target - now).total_seconds()
+    remaining = min(max_wait_seconds, max(0, int(remaining)))
+    while remaining > 0:
+        sleep_sec = min(20, remaining)
+        time.sleep(sleep_sec)
+        remaining -= sleep_sec
 
 # ================ グラデ棒 ================
 def _hex_to_rgb01(hx: str):
@@ -176,7 +191,7 @@ def draw_panel(ax, items, caption, grad_from_to, fixed_xlim: int, show_xlabel=Fa
 
 # ================ メイン ================
 def main():
-    now_jst = dt.datetime.now(dt.timezone(dt.timedelta(hours=9)))
+    now_jst = jst_now()
     if now_jst > STOP_AT_JST:
         print(f"STOP: {now_jst} > {STOP_AT_JST} なので投稿スキップ")
         return
@@ -194,8 +209,9 @@ def main():
     top_s1 = pick_top(by_season["S1"], TOP_N)
     top_s2 = pick_top(by_season["S2"], TOP_N)
 
-    xlim_s1 = compute_xlim_120pct_floorhundred(top_s1)
-    xlim_s2 = compute_xlim_120pct_floorhundred(top_s2)
+    # ★各期別に「最多×1.5を下二桁切り捨て」
+    xlim_s1 = compute_xlim_150pct_floorhundred(top_s1)
+    xlim_s2 = compute_xlim_150pct_floorhundred(top_s2)
 
     cap_s1 = "吸血鬼すぐ死ぬ　上位5位"
     cap_s2 = "吸血鬼すぐ死ぬ２　上位5位"
@@ -242,8 +258,11 @@ def main():
         f"#吸血鬼すぐ死ぬ\n#吸血鬼すぐ死ぬ２\n#応援上映エッヒョッヒョ"
     )
 
+    # ★ アンカー時刻ガード（AM/PMのみ有効）：IFTTTへ送る直前に待機
+    if RUN_LABEL in ("AM", "PM"):
+        wait_until(anchor, max_wait_seconds=15*60)
+
     # IFTTTへ送信
-    time.sleep(3)
     key   = os.getenv("IFTTT_KEY")
     event = os.getenv("IFTTT_EVENT")
     if key and event:
