@@ -2,7 +2,7 @@
 """
 sugushinu vote → image (Top 5) → commit → IFTTT
 - 1期/2期をそれぞれ上位5位で描画
-- x軸最大は「各期の最多票 × 1.5」を下二桁切り捨て（100刻みで切り下げ）、下限200
+- x軸最大は「各期の最多票 × 1.3」を下二桁切り捨て（100刻みで切り下げ）、下限200
 - タイトルは2行まで。以降は「…」
 - 1期: 黄→橙、2期: 桃→紫 の横向きグラデ棒
 - RUN_LABEL(AM/PM) のときは、IFTTT送信前に 8:00 / 20:00 まで待機して厳密時刻以降に投稿
@@ -112,12 +112,12 @@ def anchor_time_jst(now_jst: dt.datetime, run_label: str) -> dt.datetime:
         return dt.datetime(d.year, d.month, d.day, 20, 0, 0, tzinfo=tz)
     return now_jst
 
-# x軸最大：最多票×1.5 を100刻みで切り下げ（下二桁切り捨て）・最低200
-def compute_xlim_150pct_floorhundred(items) -> int:
+# x軸最大：最多票×1.3 を100刻みで切り下げ（下二桁切り捨て）・最低200
+def compute_xlim_130pct_floorhundred(items) -> int:
     if not items:
         return 200
     mv = max(v for _, v in items)
-    x = int(mv * 1.5)
+    x = int(mv * 1.3)
     x -= x % 100
     return max(200, x)
 
@@ -209,9 +209,9 @@ def main():
     top_s1 = pick_top(by_season["S1"], TOP_N)
     top_s2 = pick_top(by_season["S2"], TOP_N)
 
-    # ★各期別に「最多×1.5を下二桁切り捨て」
-    xlim_s1 = compute_xlim_150pct_floorhundred(top_s1)
-    xlim_s2 = compute_xlim_150pct_floorhundred(top_s2)
+    # ★各期別に「最多×1.3を下二桁切り捨て」
+    xlim_s1 = compute_xlim_130pct_floorhundred(top_s1)
+    xlim_s2 = compute_xlim_130pct_floorhundred(top_s2)
 
     cap_s1 = "吸血鬼すぐ死ぬ　上位5位"
     cap_s2 = "吸血鬼すぐ死ぬ２　上位5位"
