@@ -2,7 +2,8 @@
 """
 sugushinu vote → image (Top 5) → commit → IFTTT
 - 1期/2期をそれぞれ上位5位で描画
-- x軸最大は「各期の最多票 × 1.3」を下二桁切り捨て（100刻みで切り下げ）、下限200
+- x軸最大は「各期の最多票 × 1.3」を100刻みで切り下げ（下二桁切り捨て）、下限200
+- x軸最大が1000以上のときは目盛り間隔を200、それ未満は100
 - タイトルは2行まで。以降は「…」
 - 1期: 黄→橙、2期: 桃→紫 の横向きグラデ棒
 - RUN_LABEL(AM/PM) のときは、IFTTT送信前に 8:00 / 20:00 まで待機して厳密時刻以降に投稿
@@ -161,8 +162,11 @@ def draw_panel(ax, items, caption, grad_from_to, fixed_xlim: int, show_xlabel=Fa
     for rect in bars:
         _fill_rect_with_gradient(ax, rect, grad_from_to[0], grad_from_to[1])
 
+    # ★ x軸の最大値と目盛り間隔
     ax.set_xlim(0, fixed_xlim)
-    ax.set_xticks(np.arange(0, fixed_xlim+1, 100))
+    tick_step = 200 if fixed_xlim >= 1000 else 100
+    ax.set_xticks(np.arange(0, fixed_xlim + 1, tick_step))
+
     ax.tick_params(axis='x', colors='black')
     ax.tick_params(axis='y', colors='black')
     ax.set_axisbelow(True)
