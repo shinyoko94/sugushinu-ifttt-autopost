@@ -1,13 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-sugushinu vote → image (Top 5) → commit → IFTTT
-- 1期/2期をそれぞれ上位5位で描画
-- x軸最大は「各期の最多票 × 1.3」を100刻みで切り下げ（下二桁切り捨て）、下限200
-- x軸最大が1000以上のときは目盛り間隔を200、それ未満は100
-- タイトルは2行まで。以降は「…」
-- 1期: 黄→橙、2期: 桃→紫 の横向きグラデ棒
-- RUN_LABEL(AM/PM) のときは、IFTTT送信前に 8:00 / 20:00 まで待機して厳密時刻以降に投稿
-- public/ に保存 → 画像をコミット＆プッシュ → IFTTTへ送信（value1=本文, value2=画像URL）
+Final-ready (Top 10, headline reverted to '中間発表'):
+- 1期/2期を上位10位で描画
+- x軸最大 = 各期の最多票×1.3 を100刻みで切り下げ（下限200）
+- x軸最大が1000以上なら目盛り200刻み、未満は100刻み
+- FINAL_MODE=1 の時は 18:00(JST) アンカー固定＆投稿後に .FINAL_DONE をコミット
+- 見出しは常に「中間発表」（FINAL_MODEでも最終表記にしない）
+- 通常運用時は AM/PM アンカーで送信直前に待機
 """
 
 import os, re, glob, sys, time, pathlib, urllib.parse, subprocess, textwrap
@@ -40,6 +39,7 @@ def ensure_custom_font():
             + ["GenEiMGothic2", "GenEiMGothic2-Bold", "DejaVu Sans"]
         )
         rcParams["axes.unicode_minus"] = False
+        # Top10 なので少し大きめの図でバランス
         rcParams["axes.titlesize"]  = 14
         rcParams["axes.labelsize"]  = 12
         rcParams["xtick.labelsize"] = 11
@@ -48,16 +48,52 @@ def ensure_custom_font():
         print("font warn:", e, file=sys.stderr)
 ensure_custom_font()
 
-# ================ 定数 ================
+# ================ 定数/ENV ================
 VOTE_URL   = "https://sugushinu-anime.jp/vote/"
-TOP_N      = int(os.getenv("TOP_N", "5"))      # ★デフォ5
+TOP_N      = int(os.getenv("TOP_N", "10"))     # ★デフォ10
 RUN_LABEL  = os.getenv("RUN_LABEL", "")        # AM / PM / ""（手動）
 PUBLIC_DIR = pathlib.Path("public")
+
+FINAL_MODE = os.getenv("FINAL_MODE", "0") == "1"
+FINAL_ANCHOR_ENV = os.getenv("FINAL_ANCHOR_JST", "").strip()  # 例 "2025-10-01T18:00:00+09:00"
 
 CAMPAIGN_PERIOD = "投票期間：9月19日（金）～10月3日（金）"
 STOP_AT_JST = dt.datetime(2025, 10, 2, 20, 0, 0, tzinfo=dt.timezone(dt.timedelta(hours=9)))
 
 TITLE_PREFIXES = ["吸血鬼すぐ死ぬ", "吸血鬼すぐ死ぬ２"]
+FINAL_SENTINEL = pathlib.Path(".FINAL_DONE")
+
+# ================ 時刻系 ================
+def jst_tz():
+    return dt.timezone(dt.timedelta(hours=9))
+def jst_now():
+    return dt.datetime.now(jst_tz())
+def parse_iso_jst(s: str) -> dt.datetime:
+    return dt.datetime.fromisoformat(s)
+
+def anchor_time_jst(now_jst: dt.datetime, run_label: str) -> dt.datetime:
+    if FINAL_MODE:
+        if FINAL_ANCHOR_ENV:
+            return parse_iso_jst(FINAL_ANCHOR_ENV)
+        # 既定の最終アンカー（必要に応じてenvで上書き可能）
+        return dt.datetime(2025, 10, 1, 18, 0, 0, tzinfo=jst_tz())
+    # 通常モード
+    d = now_jst.date()
+    if run_label == "AM":
+        return dt.datetime(d.year, d.month, d.day, 8, 0, 0, tzinfo=jst_tz())
+    elif run_label == "PM":
+        return dt.datetime(d.year, d.month, d.day, 20, 0, 0, tzinfo=jst_tz())
+    return now_jst
+
+def wait_until(target: dt.datetime, max_wait_seconds: int = 15 * 60):
+    now = jst_now()
+    if now >= target: return
+    remaining = (target - now).total_seconds()
+    remaining = min(max_wait_seconds, max(0, int(remaining)))
+    while remaining > 0:
+        sleep_sec = min(20, remaining)
+        time.sleep(sleep_sec)
+        remaining -= sleep_sec
 
 # ================ 取得 & パース ================
 def fetch_html(url: str) -> str:
@@ -72,8 +108,7 @@ def parse_votes_by_season(html: str):
     positions = []
     for p in TITLE_PREFIXES:
         i = text.find(p)
-        if i != -1:
-            positions.append((i, p))
+        if i != -1: positions.append((i, p))
     positions.sort()
     positions.append((len(text), "END"))
 
@@ -90,49 +125,23 @@ def parse_votes_by_season(html: str):
             out["S2"].extend(items)
     return out
 
-# ================ ユーティリティ ================
+# ================ 表示ユーティリティ ================
 def _wrap(s: str, width: int = 18, max_lines: int = 2) -> str:
-    lines = textwrap.wrap(s, width=width)
-    lines = lines[:max_lines]
+    lines = textwrap.wrap(s, width=width)[:max_lines]
     if len(lines) == max_lines and len(s) > sum(len(x) for x in lines):
         lines[-1] = lines[-1].rstrip() + "…"
     return "\n".join(lines)
 
-def pick_top(items, n=5):
+def pick_top(items, n=10):
     return sorted(items, key=lambda x: (-x[1], x[0]))[:n]
-
-def jst_now():
-    return dt.datetime.now(dt.timezone(dt.timedelta(hours=9)))
-
-def anchor_time_jst(now_jst: dt.datetime, run_label: str) -> dt.datetime:
-    tz = dt.timezone(dt.timedelta(hours=9))
-    d = now_jst.date()
-    if run_label == "AM":
-        return dt.datetime(d.year, d.month, d.day, 8, 0, 0, tzinfo=tz)
-    elif run_label == "PM":
-        return dt.datetime(d.year, d.month, d.day, 20, 0, 0, tzinfo=tz)
-    return now_jst
 
 # x軸最大：最多票×1.3 を100刻みで切り下げ（下二桁切り捨て）・最低200
 def compute_xlim_130pct_floorhundred(items) -> int:
-    if not items:
-        return 200
+    if not items: return 200
     mv = max(v for _, v in items)
     x = int(mv * 1.3)
     x -= x % 100
     return max(200, x)
-
-# 投稿時刻ガード：目標時刻まで待機（最大15分）
-def wait_until(target: dt.datetime, max_wait_seconds: int = 15 * 60):
-    now = jst_now()
-    if now >= target:
-        return
-    remaining = (target - now).total_seconds()
-    remaining = min(max_wait_seconds, max(0, int(remaining)))
-    while remaining > 0:
-        sleep_sec = min(20, remaining)
-        time.sleep(sleep_sec)
-        remaining -= sleep_sec
 
 # ================ グラデ棒 ================
 def _hex_to_rgb01(hx: str):
@@ -144,8 +153,7 @@ def _fill_rect_with_gradient(ax, rect, c0_hex: str, c1_hex: str):
     w, h = rect.get_width(), rect.get_height()
     if w <= 0 or h <= 0: return
     x1, y1 = x0+w, y0+h
-    c0 = np.array(_hex_to_rgb01(c0_hex))
-    c1 = np.array(_hex_to_rgb01(c1_hex))
+    c0 = np.array(_hex_to_rgb01(c0_hex)); c1 = np.array(_hex_to_rgb01(c1_hex))
     cols = 256
     t = np.linspace(0, 1, cols).reshape(1, cols, 1)
     grad = c0 + (c1 - c0) * t
@@ -162,7 +170,7 @@ def draw_panel(ax, items, caption, grad_from_to, fixed_xlim: int, show_xlabel=Fa
     for rect in bars:
         _fill_rect_with_gradient(ax, rect, grad_from_to[0], grad_from_to[1])
 
-    # ★ x軸の最大値と目盛り間隔
+    # x軸最大と目盛り
     ax.set_xlim(0, fixed_xlim)
     tick_step = 200 if fixed_xlim >= 1000 else 100
     ax.set_xticks(np.arange(0, fixed_xlim + 1, tick_step))
@@ -176,12 +184,10 @@ def draw_panel(ax, items, caption, grad_from_to, fixed_xlim: int, show_xlabel=Fa
 
     ax.set_yticks(y)
     ax.set_yticklabels(titles, color='black')
-
     ax.set_title(caption, color='black')
 
-    # 上下の余白（端が枠に当たらないように）
-    top_pad = 0.6
-    bottom_pad = 0.6
+    # 上下の余白（端当たり防止）
+    top_pad = 0.6; bottom_pad = 0.6
     ymin = min(y) - 0.5 - bottom_pad
     ymax = max(y) + 0.5 + top_pad
     ax.set_ylim(ymin, ymax)
@@ -195,16 +201,22 @@ def draw_panel(ax, items, caption, grad_from_to, fixed_xlim: int, show_xlabel=Fa
 
 # ================ メイン ================
 def main():
+    # 最終済みなら即スキップ
+    if FINAL_MODE and FINAL_SENTINEL.exists():
+        print("FINAL_MODE: sentinel exists. skip further runs.")
+        return
+
     now_jst = jst_now()
-    if now_jst > STOP_AT_JST:
+    if not FINAL_MODE and now_jst > STOP_AT_JST:
         print(f"STOP: {now_jst} > {STOP_AT_JST} なので投稿スキップ")
         return
 
     anchor = anchor_time_jst(now_jst, RUN_LABEL)
     stamp_day  = anchor.strftime("%Y-%m-%d")
     month_day  = anchor.strftime("%m/%d")
-    time_label = "8:00時点" if RUN_LABEL=="AM" else ("20:00時点" if RUN_LABEL=="PM" else now_jst.strftime("%H:%M時点"))
+    time_label = "18:00時点" if FINAL_MODE else ("8:00時点" if RUN_LABEL=="AM" else ("20:00時点" if RUN_LABEL=="PM" else now_jst.strftime("%H:%M時点")))
 
+    # 票取得（最終日は17:57〜59に叩いて確保→18:00まで待って投稿）
     html = fetch_html(VOTE_URL)
     by_season = parse_votes_by_season(html)
     if not (by_season["S1"] or by_season["S2"]):
@@ -213,19 +225,21 @@ def main():
     top_s1 = pick_top(by_season["S1"], TOP_N)
     top_s2 = pick_top(by_season["S2"], TOP_N)
 
-    # ★各期別に「最多×1.3を下二桁切り捨て」
     xlim_s1 = compute_xlim_130pct_floorhundred(top_s1)
     xlim_s2 = compute_xlim_130pct_floorhundred(top_s2)
 
-    cap_s1 = "吸血鬼すぐ死ぬ　上位5位"
-    cap_s2 = "吸血鬼すぐ死ぬ２　上位5位"
+    cap_s1 = "吸血鬼すぐ死ぬ　上位10位"
+    cap_s2 = "吸血鬼すぐ死ぬ２　上位10位"
 
+    # Top10 用に高さ増量
     try:
-        fig, axes = plt.subplots(nrows=2, ncols=1, figsize=(10.2, 10.5), dpi=220,
-                                 sharex=False, layout='constrained')
-        fig.set_constrained_layout_pads(w_pad=0.4, h_pad=0.10, hspace=0.02, wspace=0.2)
+        fig, axes = plt.subplots(
+            nrows=2, ncols=1, figsize=(10.2, 16.0), dpi=220,
+            sharex=False, layout='constrained'
+        )
+        fig.set_constrained_layout_pads(w_pad=0.4, h_pad=0.12, hspace=0.02, wspace=0.2)
     except TypeError:
-        fig, axes = plt.subplots(nrows=2, ncols=1, figsize=(10.2, 10.5), dpi=220, sharex=False)
+        fig, axes = plt.subplots(nrows=2, ncols=1, figsize=(10.2, 16.0), dpi=220, sharex=False)
         fig.tight_layout(rect=(0.05, 0.05, 0.98, 0.98))
 
     # カラー（指定のグラデ）
@@ -233,18 +247,17 @@ def main():
     color_s2_left,  color_s2_right  = "#FE2E82", "#4F287D"  # 桃→紫
 
     draw_panel(axes[0], top_s1, cap_s1, (color_s1_left, color_s1_right), fixed_xlim=xlim_s1, show_xlabel=False)
-    axes[0].tick_params(axis='x', labelbottom=True)  # 1期もx軸目盛り表示
-
+    axes[0].tick_params(axis='x', labelbottom=True)
     draw_panel(axes[1], top_s2, cap_s2, (color_s2_left, color_s2_right), fixed_xlim=xlim_s2, show_xlabel=True)
 
     PUBLIC_DIR.mkdir(exist_ok=True)
-    fname = f"ranking_S1S2Top{TOP_N}_{stamp_day}_{RUN_LABEL or 'RUN'}.png"
+    fname = f"ranking_S1S2Top{TOP_N}_{stamp_day}_{('FINAL' if FINAL_MODE else (RUN_LABEL or 'RUN'))}.png"
     out   = PUBLIC_DIR / fname
     plt.savefig(out, format="png", dpi=220, bbox_inches="tight", pad_inches=0.15)
     plt.close(fig)
 
     repo = os.getenv("GITHUB_REPOSITORY")
-    ref  = os.getenv("GITHUB_REF_NAME", "main")
+    ref  = os.getenv("GITHUB_REF_NAME", "main") or "main"
     img_url = f"https://raw.githubusercontent.com/{repo}/{ref}/public/{urllib.parse.quote(fname)}"
 
     # 画像をコミット＆プッシュ
@@ -254,16 +267,17 @@ def main():
     subprocess.run(["git", "commit", "-m", f"Add {fname}"], check=True)
     subprocess.run(["git", "push"], check=True)
 
-    # ツイート本文（「中間発表」）
+    # 見出しは常に「中間発表」
+    headline = "中間発表"
     body = (
-        f"🗳️エピソード投票中間発表（{month_day} {time_label}）🗳️\n"
+        f"🗳️エピソード投票{headline}（{month_day} {time_label}）🗳️\n"
         f"\n{CAMPAIGN_PERIOD}\n"
         f"投票はこちらから（1日1回）→ https://sugushinu-anime.jp/vote/\n\n"
         f"#吸血鬼すぐ死ぬ\n#吸血鬼すぐ死ぬ２\n#応援上映エッヒョッヒョ"
     )
 
-    # ★ アンカー時刻ガード（AM/PMのみ有効）：IFTTTへ送る直前に待機
-    if RUN_LABEL in ("AM", "PM"):
+    # アンカーまで待機（FINAL_MODEは 18:00 固定）
+    if FINAL_MODE or RUN_LABEL in ("AM", "PM"):
         wait_until(anchor, max_wait_seconds=15*60)
 
     # IFTTTへ送信
@@ -278,6 +292,13 @@ def main():
 
     print(f"IFTTT_TEXT::{body}")
     print(f"IFTTT_IMG::{img_url}")
+
+    # 最終フラグ：以降のRunを無害化（FINAL_MODEのみ）
+    if FINAL_MODE:
+        FINAL_SENTINEL.write_text("done\n", encoding="utf-8")
+        subprocess.run(["git", "add", str(FINAL_SENTINEL)], check=True)
+        subprocess.run(["git", "commit", "-m", "Mark FINAL_DONE"], check=True)
+        subprocess.run(["git", "push"], check=True)
 
 if __name__ == "__main__":
     main()
