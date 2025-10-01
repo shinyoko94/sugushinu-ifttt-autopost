@@ -1,401 +1,304 @@
-#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""
+Final-ready (Top 10, headline reverted to '中間発表'):
+- 1期/2期を上位10位で描画
+- x軸最大 = 各期の最多票×1.3 を100刻みで切り下げ（下限200）
+- x軸最大が1000以上なら目盛り200刻み、未満は100刻み
+- FINAL_MODE=1 の時は 18:00(JST) アンカー固定＆投稿後に .FINAL_DONE をコミット
+- 見出しは常に「中間発表」（FINAL_MODEでも最終表記にしない）
+- 通常運用時は AM/PM アンカーで送信直前に待機
+"""
 
-import os
-import re
-import io
-import time
-import json
-import math
-import base64
+import os, re, glob, sys, time, pathlib, urllib.parse, subprocess, textwrap
 import datetime as dt
-from typing import List, Tuple, Dict, Any
-
 import requests
 from bs4 import BeautifulSoup
-import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.ticker import MultipleLocator
+from matplotlib import rcParams
+import numpy as np
 
-# ===================== 基本設定 =====================
+# ================= フォント =================
+def ensure_custom_font():
+    from matplotlib import font_manager
+    try:
+        pref_path = "fonts/GenEiMGothic2-Bold.ttf"
+        pref_name = None
+        if os.path.isfile(pref_path):
+            font_manager.fontManager.addfont(pref_path)
+            pref_name = font_manager.FontProperties(fname=pref_path).get_name()
+        for p in glob.glob("fonts/**/*.[ot]tf", recursive=True) + glob.glob("fonts/*.[ot]tf"):
+            try:
+                if os.path.abspath(p) != os.path.abspath(pref_path):
+                    font_manager.fontManager.addfont(p)
+            except Exception:
+                pass
+        rcParams["font.family"] = "sans-serif"
+        rcParams["font.sans-serif"] = (
+            ["Noto Sans CJK JP", "Noto Sans CJK JP Regular"]
+            + ([pref_name] if pref_name else [])
+            + ["GenEiMGothic2", "GenEiMGothic2-Bold", "DejaVu Sans"]
+        )
+        rcParams["axes.unicode_minus"] = False
+        # Top10 なので少し大きめの図でバランス
+        rcParams["axes.titlesize"]  = 14
+        rcParams["axes.labelsize"]  = 12
+        rcParams["xtick.labelsize"] = 11
+        rcParams["ytick.labelsize"] = 11
+    except Exception as e:
+        print("font warn:", e, file=sys.stderr)
+ensure_custom_font()
 
-JST = dt.timezone(dt.timedelta(hours=9))
-SESSION = requests.Session()
-SESSION.headers.update({
-    "User-Agent": "Mozilla/5.0 (compatible; sugushinu-vote-bot/1.0; +https://github.com/)"
-})
+# ================ 定数/ENV ================
+VOTE_URL   = "https://sugushinu-anime.jp/vote/"
+TOP_N      = int(os.getenv("TOP_N", "10"))     # ★デフォ10
+RUN_LABEL  = os.getenv("RUN_LABEL", "")        # AM / PM / ""（手動）
+PUBLIC_DIR = pathlib.Path("public")
 
-VOTE_URL = "https://sugushinu-anime.jp/vote/"
+FINAL_MODE = os.getenv("FINAL_MODE", "0") == "1"
+FINAL_ANCHOR_ENV = os.getenv("FINAL_ANCHOR_JST", "").strip()  # 例 "2025-10-01T18:00:00+09:00"
 
-# IFTTT: Secrets（GitHub Actions の env/Secrets から）
-IFTTT_KEY = os.environ.get("IFTTT_KEY", "")
-IFTTT_EVENT = os.environ.get("IFTTT_EVENT", "")     # 例: "sugushinu_vote_update"
+CAMPAIGN_PERIOD = "投票期間：9月19日（金）～10月3日（金）"
+STOP_AT_JST = dt.datetime(2025, 10, 2, 20, 0, 0, tzinfo=dt.timezone(dt.timedelta(hours=9)))
 
-# FINAL モード（18:00 アンカー運用に使う時に 1）
-FINAL_MODE = os.environ.get("FINAL_MODE", "0") == "1"
-# アンカー時刻を手動で上書きしたい時（JST ISO8601）。例: "2025-10-01T18:00:00+09:00"
-FINAL_ANCHOR_JST = os.environ.get("FINAL_ANCHOR_JST", "")
-# アンカー待ちのポーリング（秒）
-FINAL_POLL_SEC = int(os.environ.get("FINAL_POLL_SEC", "5"))
-# アンカーの少し前に“スクレイプ＆画像生成”を済ませるためのリード（秒）
-FINAL_SNAPSHOT_PRESEC = int(os.environ.get("FINAL_SNAPSHOT_PRESEC", "60"))
+TITLE_PREFIXES = ["吸血鬼すぐ死ぬ", "吸血鬼すぐ死ぬ２"]
+FINAL_SENTINEL = pathlib.Path(".FINAL_DONE")
 
-# 画像の出力
-PUBLIC_DIR = "public"
-os.makedirs(PUBLIC_DIR, exist_ok=True)
+# ================ 時刻系 ================
+def jst_tz():
+    return dt.timezone(dt.timedelta(hours=9))
+def jst_now():
+    return dt.datetime.now(jst_tz())
+def parse_iso_jst(s: str) -> dt.datetime:
+    return dt.datetime.fromisoformat(s)
 
-# ===================== ユーティリティ =====================
+def anchor_time_jst(now_jst: dt.datetime, run_label: str) -> dt.datetime:
+    if FINAL_MODE:
+        if FINAL_ANCHOR_ENV:
+            return parse_iso_jst(FINAL_ANCHOR_ENV)
+        # 既定の最終アンカー（必要に応じてenvで上書き可能）
+        return dt.datetime(2025, 10, 1, 18, 0, 0, tzinfo=jst_tz())
+    # 通常モード
+    d = now_jst.date()
+    if run_label == "AM":
+        return dt.datetime(d.year, d.month, d.day, 8, 0, 0, tzinfo=jst_tz())
+    elif run_label == "PM":
+        return dt.datetime(d.year, d.month, d.day, 20, 0, 0, tzinfo=jst_tz())
+    return now_jst
 
-def jst_now() -> dt.datetime:
-    return dt.datetime.now(JST)
-
-def today_anchor_18() -> dt.datetime:
+def wait_until(target: dt.datetime, max_wait_seconds: int = 15 * 60):
     now = jst_now()
-    return now.replace(hour=18, minute=0, second=0, microsecond=0)
+    if now >= target: return
+    remaining = (target - now).total_seconds()
+    remaining = min(max_wait_seconds, max(0, int(remaining)))
+    while remaining > 0:
+        sleep_sec = min(20, remaining)
+        time.sleep(sleep_sec)
+        remaining -= sleep_sec
 
-def parse_anchor_env() -> dt.datetime:
-    if FINAL_ANCHOR_JST:
-        # 例: "2025-10-01T18:00:00+09:00"
-        return dt.datetime.fromisoformat(FINAL_ANCHOR_JST)
-    return today_anchor_18()
-
-# ===================== スクレイピング =====================
-
+# ================ 取得 & パース ================
 def fetch_html(url: str) -> str:
-    r = SESSION.get(url, timeout=30)
+    r = requests.get(url, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
     r.raise_for_status()
     return r.text
 
-def _extract_title_and_votes_lis(container: Any) -> List[Tuple[str, int]]:
-    """
-    サイトの構造変化に耐えるため、よくあるパターンを総当たりで拾う。
-    返り値: [(タイトル, 票数)] 降順ではない（後で並び替え）
-    """
-    items: List[Tuple[str, int]] = []
-    if container is None:
-        return items
-
-    # li や div を総当りで見て、タイトル+数字 を拾う
-    candidates = container.select("li, div, article")
-    pat_num = re.compile(r"(\d{1,4}(?:,\d{3})*)")  # 1,234 も 1234 もOK
-    for c in candidates:
-        txt = c.get_text(" ", strip=True)
-        if not txt:
-            continue
-        # 票数っぽい数字を探す
-        m = pat_num.search(txt)
-        if not m:
-            continue
-        n = int(m.group(1).replace(",", ""))
-        # タイトル部分を数字より前で大まかに切り出す
-        title = txt
-        # よくある見出しワードを間引き
-        title = re.sub(r"(投票|票|合計|Total|Votes?)", "", title, flags=re.I)
-        # 数字以降を落とす
-        title = title.split(m.group(1))[0].strip(" .:：-–—")
-        if not title:
-            continue
-        # 極端に長すぎるゴミはスキップ
-        if len(title) > 200:
-            continue
-        items.append((title, n))
-    return items
-
-def scrape_vote() -> Dict[str, List[Tuple[str, int]]]:
-    """
-    返却: {"s1": [(title, votes), ...], "s2": [...]}  ※順不同
-    """
-    html = fetch_html(VOTE_URL)
+def parse_votes_by_season(html: str):
     soup = BeautifulSoup(html, "lxml")
+    text = soup.get_text("\n", strip=True)
 
-    # セクションを見つける（見出しに「吸血鬼すぐ死ぬ」「吸血鬼すぐ死ぬ２」等）
-    sections = soup.find_all(["section", "div", "article"])
-    s1_items: List[Tuple[str, int]] = []
-    s2_items: List[Tuple[str, int]] = []
+    positions = []
+    for p in TITLE_PREFIXES:
+        i = text.find(p)
+        if i != -1: positions.append((i, p))
+    positions.sort()
+    positions.append((len(text), "END"))
 
-    KEY_S1 = re.compile(r"吸血鬼すぐ死ぬ($|[^２2])")
-    KEY_S2 = re.compile(r"(吸血鬼すぐ死ぬ\s*2|吸血鬼すぐ死ぬ２)")
+    pat = re.compile(r"『([^』]+)』\s*([0-9]{1,6})")
+    out = {"S1": [], "S2": []}
+    for i in range(len(positions) - 1):
+        start, name = positions[i]
+        end, _ = positions[i + 1]
+        block = text[start:end]
+        items = [(m.group(1).strip(), int(m.group(2))) for m in pat.finditer(block)]
+        if name == "吸血鬼すぐ死ぬ":
+            out["S1"].extend(items)
+        elif name == "吸血鬼すぐ死ぬ２":
+            out["S2"].extend(items)
+    return out
 
-    for sec in sections:
-        text = sec.get_text(" ", strip=True)
-        if not text:
-            continue
-
-        # セクション見出しで判定
-        is_s1 = bool(KEY_S1.search(text))
-        is_s2 = bool(KEY_S2.search(text))
-
-        # セクション直下から候補抽出
-        lis = _extract_title_and_votes_lis(sec)
-        if not lis:
-            continue
-
-        # 片方にしか入ってないのが普通
-        if is_s1 and not is_s2:
-            s1_items.extend(lis)
-        elif is_s2 and not is_s1:
-            s2_items.extend(lis)
-
-    # もし両方拾えなかったら、全体から一括拾い→タイトルヒューリスティックで分配
-    if not s1_items and not s2_items:
-        lis_all = _extract_title_and_votes_lis(soup)
-        for t, n in lis_all:
-            if KEY_S2.search(t):
-                s2_items.append((t, n))
-            else:
-                s1_items.append((t, n))
-
-    # タイトルのノイズ削り（先頭の連番 "1." など）
-    def _clean_title(tt: str) -> str:
-        tt = re.sub(r"^\s*\d+\s*[.．、)\]]\s*", "", tt)
-        return tt.strip()
-
-    s1_items = [(_clean_title(t), v) for t, v in s1_items]
-    s2_items = [(_clean_title(t), v) for t, v in s2_items]
-
-    # 0票などの異常を除外
-    s1_items = [(t, v) if v >= 0 else (t, 0) for t, v in s1_items]
-    s2_items = [(t, v) if v >= 0 else (t, 0) for t, v in s2_items]
-
-    return {"s1": s1_items, "s2": s2_items}
-
-# ===================== ランキング整形 =====================
-
-def sort_and_top(items: List[Tuple[str, int]], topn: int) -> Tuple[List[str], List[int]]:
-    # 票数降順、同点はタイトルで安定ソート
-    arr = sorted(items, key=lambda x: (-x[1], x[0]))
-    arr = arr[:topn]
-    titles = [a[0] for a in arr]
-    votes = [a[1] for a in arr]
-    return titles, votes
-
-# ===================== 描画（上位10版：バー太さ＆中央タイトルを当時の体裁に戻す） =====================
-
-TOP_N = 10
-BAR_HEIGHT = 0.62
-TITLE_FONTSIZE = 16
-TICK_FONTSIZE = 12
-LABEL_FONTSIZE = 14
-VALUE_FONTSIZE = 18
-
-C1_FROM, C1_TO = "#FFFF00", "#FF8A00"  # 1期：黄→橙
-C2_FROM, C2_TO = "#FE2E82", "#4F287D"  # 2期：桃→紫
-
-def _hex2rgb(h):
-    h = h.lstrip('#')
-    return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
-
-def _interp_color(c1, c2, t):
-    a = np.array(_hex2rgb(c1)); b = np.array(_hex2rgb(c2))
-    rgb = (a + (b - a) * t).astype(int)
-    return '#%02X%02X%02X' % tuple(rgb)
-
-def _make_colors(n, c_from, c_to):
-    if n <= 1: return [c_to]
-    return [_interp_color(c_from, c_to, i/(n-1)) for i in range(n)]
-
-def _xmax_scale(max_votes: int) -> Tuple[int, int]:
-    """
-    x軸最大 = floor(最多票×1.3 / 100) * 100
-    1000以上は目盛200刻み
-    """
-    raw = max_votes * 1.3
-    xmax = max(int(raw // 100) * 100, ((max_votes + 99) // 100) * 100)
-    tick = 200 if xmax >= 1000 else 100
-    return int(xmax), int(tick)
-
-def _trim_title3lines(s: str, max_lines=3) -> str:
-    lines = s.split("\n")
-    if len(lines) <= max_lines:
-        return s
-    return "\n".join(lines[:max_lines]) + "…"
-
-def draw_top10_figure(
-    s1_titles: List[str], s1_votes: List[int],
-    s2_titles: List[str], s2_votes: List[int],
-    jst_now: dt.datetime, out_path: str
-):
-    n1 = min(TOP_N, len(s1_titles))
-    n2 = min(TOP_N, len(s2_titles))
-    t1, v1 = s1_titles[:n1], s1_votes[:n1]
-    t2, v2 = s2_titles[:n2], s2_votes[:n2]
-
-    xmax1, tick1 = _xmax_scale(max(v1) if v1 else 100)
-    xmax2, tick2 = _xmax_scale(max(v2) if v2 else 100)
-
-    fig_h = 13 if TOP_N == 10 else 10
-    fig = plt.figure(figsize=(10.5, fig_h), dpi=220)
-    gs = fig.add_gridspec(2, 1, height_ratios=[1, 1])
-
-    # 1期
-    ax1 = fig.add_subplot(gs[0, 0])
-    y1 = np.arange(n1)
-    colors1 = _make_colors(n1, C1_FROM, C1_TO)
-    ax1.barh(y1, v1, height=BAR_HEIGHT, color=colors1, edgecolor='none')
-
-    ts = jst_now.strftime('%Y/%m/%d %H:%M JST')
-    title1 = f"吸血鬼すぐ死ぬ（1期） 上位{n1}（{ts}）"
-    ax1.set_title(_trim_title3lines(title1), fontsize=TITLE_FONTSIZE, loc='center')
-
-    ax1.set_xlim(0, xmax1)
-    ax1.xaxis.set_major_locator(MultipleLocator(tick1))
-    ax1.set_xlabel("投票数", fontsize=LABEL_FONTSIZE)
-    ax1.tick_params(axis='both', labelsize=TICK_FONTSIZE)
-    ax1.set_ylim(-0.6, n1-0.4)
-
-    left_labels1 = [f"{i+1}. {t}" for i, t in enumerate(t1)]
-    ax1.set_yticks(y1, labels=left_labels1)
-
-    for y, val in zip(y1, v1):
-        ax1.text(val + xmax1*0.01, y, f"{val}", va="center", ha="left", fontsize=VALUE_FONTSIZE)
-
-    # 2期
-    ax2 = fig.add_subplot(gs[1, 0])
-    y2 = np.arange(n2)
-    colors2 = _make_colors(n2, C2_FROM, C2_TO)
-    ax2.barh(y2, v2, height=BAR_HEIGHT, color=colors2, edgecolor='none')
-
-    title2 = f"吸血鬼すぐ死ぬ２（2期） 上位{n2}（{ts}）"
-    ax2.set_title(_trim_title3lines(title2), fontsize=TITLE_FONTSIZE, loc='center')
-
-    ax2.set_xlim(0, xmax2)
-    ax2.xaxis.set_major_locator(MultipleLocator(tick2))
-    ax2.set_xlabel("投票数", fontsize=LABEL_FONTSIZE)
-    ax2.tick_params(axis='both', labelsize=TICK_FONTSIZE)
-    ax2.set_ylim(-0.6, n2-0.4)
-
-    left_labels2 = [f"{i+1}. {t}" for i, t in enumerate(t2)]
-    ax2.set_yticks(y2, labels=left_labels2)
-
-    for y, val in zip(y2, v2):
-        ax2.text(val + xmax2*0.01, y, f"{val}", va="center", ha="left", fontsize=VALUE_FONTSIZE)
-
-    # 余白（左広め、段間も少し）
-    fig.subplots_adjust(left=0.30, right=0.98, top=0.95, bottom=0.08, hspace=0.36)
-
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    plt.savefig(out_path, format="png", bbox_inches="tight", pad_inches=0.15)
-    plt.close(fig)
-
-# ===================== Git & IFTTT =====================
-
-def git_commit_and_push(paths: List[str], message: str):
-    # 設定（Actions bot）
-    try:
-        subprocess_run(["git", "config", "user.name", "github-actions[bot]"])
-        subprocess_run(["git", "config", "user.email", "github-actions[bot]@users.noreply.github.com"])
-    except Exception:
-        pass
-    for p in paths:
-        subprocess_run(["git", "add", p])
-    subprocess_run(["git", "commit", "-m", message], check=False)
-    subprocess_run(["git", "push"])
-
-def subprocess_run(cmd, check=True):
-    import subprocess
-    print("$", " ".join(cmd))
-    return subprocess.run(cmd, check=check)
-
-def _raw_url_for(image_path: str) -> str:
-    import subprocess
-    sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
-    repo_full = os.environ.get("GITHUB_REPOSITORY", "")
-    if "/" in repo_full:
-        owner, repo = repo_full.split("/", 1)
-    else:
-        owner = "shinyoko94"
-        repo = "sugushinu-ifttt-autopost"
-    rel = os.path.relpath(image_path).replace("\\", "/")
-    return f"https://raw.githubusercontent.com/{owner}/{repo}/{sha}/{rel}"
-
-def _wait_url_ok(url: str, tries=15, interval=2):
-    for i in range(tries):
-        try:
-            r = SESSION.head(url, timeout=10)
-            if r.ok:
-                return True
-        except Exception:
-            pass
-        time.sleep(interval)
-    return False
-
-def ifttt_post(image_path: str, text: str):
-    if not (IFTTT_KEY and IFTTT_EVENT):
-        print("IFTTT env not set. skip tweet.")
-        return
-
-    file_url = _raw_url_for(image_path)
-    ok = _wait_url_ok(file_url, tries=15, interval=2)
-    print("raw URL ready:", ok, file_url)
-
-    url = f"https://maker.ifttt.com/trigger/{IFTTT_EVENT}/with/key/{IFTTT_KEY}"
-    payload = {
-        "value1": text,          # 本文
-        "file": file_url         # アプレット側の Image URL に {{FileUrl}} を設定している場合
-        # もし Image URL を {{Value2}} にしているなら: "value2": file_url
-    }
-    r = SESSION.post(url, json=payload, timeout=30)
-    print("IFTTT status:", r.status_code, r.text[:200] if r.text else "")
-
-# ===================== メイン処理 =====================
-
-def build_tweet_text(now: dt.datetime) -> str:
-    # 「中間発表」版（ユーザー要望準拠）
-    ts = now.strftime("%m/%d %H:%M")
-    lines = [
-        f"🗳️エピソード投票中間発表（{ts}時点）🗳️",
-        "",
-        "投票期間：9月19日（金）～10月3日（金）",
-        "投票はこちらから（1日1回）→ https://sugushinu-anime.jp/vote/",
-        "",
-        "#吸血鬼すぐ死ぬ",
-        "#吸血鬼すぐ死ぬ２",
-        "#応援上映エッヒョッヒョ",
-    ]
+# ================ 表示ユーティリティ ================
+def _wrap(s: str, width: int = 18, max_lines: int = 2) -> str:
+    lines = textwrap.wrap(s, width=width)[:max_lines]
+    if len(lines) == max_lines and len(s) > sum(len(x) for x in lines):
+        lines[-1] = lines[-1].rstrip() + "…"
     return "\n".join(lines)
 
+def pick_top(items, n=10):
+    return sorted(items, key=lambda x: (-x[1], x[0]))[:n]
+
+# x軸最大：最多票×1.3 を100刻みで切り下げ（下二桁切り捨て）・最低200
+def compute_xlim_130pct_floorhundred(items) -> int:
+    if not items: return 200
+    mv = max(v for _, v in items)
+    x = int(mv * 1.3)
+    x -= x % 100
+    return max(200, x)
+
+# ================ グラデ棒 ================
+def _hex_to_rgb01(hx: str):
+    hx = hx.lstrip('#')
+    return (int(hx[0:2],16)/255.0, int(hx[2:4],16)/255.0, int(hx[4:6],16)/255.0)
+
+def _fill_rect_with_gradient(ax, rect, c0_hex: str, c1_hex: str):
+    x0, y0 = rect.get_x(), rect.get_y()
+    w, h = rect.get_width(), rect.get_height()
+    if w <= 0 or h <= 0: return
+    x1, y1 = x0+w, y0+h
+    c0 = np.array(_hex_to_rgb01(c0_hex)); c1 = np.array(_hex_to_rgb01(c1_hex))
+    cols = 256
+    t = np.linspace(0, 1, cols).reshape(1, cols, 1)
+    grad = c0 + (c1 - c0) * t
+    ax.imshow(grad, extent=[x0,x1,y0,y1], origin='lower',
+              aspect='auto', interpolation='bicubic', zorder=0, clip_on=True)
+
+# ================ 描画 ================
+def draw_panel(ax, items, caption, grad_from_to, fixed_xlim: int, show_xlabel=False):
+    titles = [f"{i+1}. {_wrap(t[0])}" for i, t in enumerate(items)]
+    votes  = [int(t[1]) for t in items]
+    y = list(range(len(titles)))[::-1]
+
+    bars = ax.barh(y, votes, color='none', edgecolor='none', zorder=1)
+    for rect in bars:
+        _fill_rect_with_gradient(ax, rect, grad_from_to[0], grad_from_to[1])
+
+    # x軸最大と目盛り
+    ax.set_xlim(0, fixed_xlim)
+    tick_step = 200 if fixed_xlim >= 1000 else 100
+    ax.set_xticks(np.arange(0, fixed_xlim + 1, tick_step))
+
+    ax.tick_params(axis='x', colors='black')
+    ax.tick_params(axis='y', colors='black')
+    ax.set_axisbelow(True)
+    ax.xaxis.grid(True, linestyle=":", alpha=0.3, zorder=0)
+    if show_xlabel:
+        ax.set_xlabel("投票数", color='black')
+
+    ax.set_yticks(y)
+    ax.set_yticklabels(titles, color='black')
+    ax.set_title(caption, color='black')
+
+    # 上下の余白（端当たり防止）
+    top_pad = 0.6; bottom_pad = 0.6
+    ymin = min(y) - 0.5 - bottom_pad
+    ymax = max(y) + 0.5 + top_pad
+    ax.set_ylim(ymin, ymax)
+
+    # 票数ラベル（はみ出し防止）
+    pad = fixed_xlim * 0.02
+    for bar, v in zip(bars, votes):
+        x = min(bar.get_width() + pad, fixed_xlim - pad * 0.5)
+        ax.text(x, bar.get_y()+bar.get_height()/2, f"{v:,}",
+                va="center", ha="left", fontsize=22, color='black', zorder=2)
+
+# ================ メイン ================
 def main():
-    now = jst_now()
-
-    # FINAL_MODE の時はアンカー運用（17:59 取得→18:00 投稿）
-    if FINAL_MODE:
-        anchor = parse_anchor_env()
-        fetch_time = anchor - dt.timedelta(seconds=FINAL_SNAPSHOT_PRESEC)
-        print(f"[FINAL] anchor={anchor}, fetch_time={fetch_time}")
-
-        # 取得タイミングまで待機
-        while jst_now() < fetch_time:
-            time.sleep(max(1, min(30, FINAL_POLL_SEC)))
-
-        # スクレイプ＆生成
-        data = scrape_vote()
-        s1_titles, s1_votes = sort_and_top(data["s1"], TOP_N)
-        s2_titles, s2_votes = sort_and_top(data["s2"], TOP_N)
-
-        out = os.path.join(PUBLIC_DIR, f"ranking_S1S2Top10_{anchor.date()}_FINAL.png")
-        draw_top10_figure(s1_titles, s1_votes, s2_titles, s2_votes, jst_now(), out)
-
-        # コミット・プッシュ
-        git_commit_and_push([out], f"Add {os.path.basename(out)}")
-
-        # 投稿時刻まで待機
-        while jst_now() < anchor:
-            time.sleep(max(1, min(30, FINAL_POLL_SEC)))
-
-        # ツイート
-        ifttt_post(out, build_tweet_text(anchor))
+    # 最終済みなら即スキップ
+    if FINAL_MODE and FINAL_SENTINEL.exists():
+        print("FINAL_MODE: sentinel exists. skip further runs.")
         return
 
-    # 通常モード：即スクレイプ＆生成＆投稿
-    data = scrape_vote()
-    s1_titles, s1_votes = sort_and_top(data["s1"], TOP_N)
-    s2_titles, s2_votes = sort_and_top(data["s2"], TOP_N)
+    now_jst = jst_now()
+    if not FINAL_MODE and now_jst > STOP_AT_JST:
+        print(f"STOP: {now_jst} > {STOP_AT_JST} なので投稿スキップ")
+        return
 
-    out = os.path.join(PUBLIC_DIR, f"ranking_S1S2Top10_{now.date()}_RUN.png")
-    draw_top10_figure(s1_titles, s1_votes, s2_titles, s2_votes, now, out)
+    anchor = anchor_time_jst(now_jst, RUN_LABEL)
+    stamp_day  = anchor.strftime("%Y-%m-%d")
+    month_day  = anchor.strftime("%m/%d")
+    time_label = "18:00時点" if FINAL_MODE else ("8:00時点" if RUN_LABEL=="AM" else ("20:00時点" if RUN_LABEL=="PM" else now_jst.strftime("%H:%M時点")))
 
-    git_commit_and_push([out], f"Add {os.path.basename(out)}")
-    ifttt_post(out, build_tweet_text(now))
+    # 票取得（最終日は17:57〜59に叩いて確保→18:00まで待って投稿）
+    html = fetch_html(VOTE_URL)
+    by_season = parse_votes_by_season(html)
+    if not (by_season["S1"] or by_season["S2"]):
+        raise SystemExit("票データが取れませんでした。")
+
+    top_s1 = pick_top(by_season["S1"], TOP_N)
+    top_s2 = pick_top(by_season["S2"], TOP_N)
+
+    xlim_s1 = compute_xlim_130pct_floorhundred(top_s1)
+    xlim_s2 = compute_xlim_130pct_floorhundred(top_s2)
+
+    cap_s1 = "吸血鬼すぐ死ぬ　上位10位"
+    cap_s2 = "吸血鬼すぐ死ぬ２　上位10位"
+
+    # Top10 用に高さ増量
+    try:
+        fig, axes = plt.subplots(
+            nrows=2, ncols=1, figsize=(10.2, 16.0), dpi=220,
+            sharex=False, layout='constrained'
+        )
+        fig.set_constrained_layout_pads(w_pad=0.4, h_pad=0.12, hspace=0.02, wspace=0.2)
+    except TypeError:
+        fig, axes = plt.subplots(nrows=2, ncols=1, figsize=(10.2, 16.0), dpi=220, sharex=False)
+        fig.tight_layout(rect=(0.05, 0.05, 0.98, 0.98))
+
+    # カラー（指定のグラデ）
+    color_s1_left,  color_s1_right  = "#FFFF00", "#FF8A00"  # 黄→橙
+    color_s2_left,  color_s2_right  = "#FE2E82", "#4F287D"  # 桃→紫
+
+    draw_panel(axes[0], top_s1, cap_s1, (color_s1_left, color_s1_right), fixed_xlim=xlim_s1, show_xlabel=False)
+    axes[0].tick_params(axis='x', labelbottom=True)
+    draw_panel(axes[1], top_s2, cap_s2, (color_s2_left, color_s2_right), fixed_xlim=xlim_s2, show_xlabel=True)
+
+    PUBLIC_DIR.mkdir(exist_ok=True)
+    fname = f"ranking_S1S2Top{TOP_N}_{stamp_day}_{('FINAL' if FINAL_MODE else (RUN_LABEL or 'RUN'))}.png"
+    out   = PUBLIC_DIR / fname
+    plt.savefig(out, format="png", dpi=220, bbox_inches="tight", pad_inches=0.15)
+    plt.close(fig)
+
+    repo = os.getenv("GITHUB_REPOSITORY")
+    ref  = os.getenv("GITHUB_REF_NAME", "main") or "main"
+    img_url = f"https://raw.githubusercontent.com/{repo}/{ref}/public/{urllib.parse.quote(fname)}"
+
+    # 画像をコミット＆プッシュ
+    subprocess.run(["git", "config", "user.name",  "github-actions[bot]"], check=True)
+    subprocess.run(["git", "config", "user.email", "github-actions[bot]@users.noreply.github.com"], check=True)
+    subprocess.run(["git", "add", str(out)], check=True)
+    subprocess.run(["git", "commit", "-m", f"Add {fname}"], check=True)
+    subprocess.run(["git", "push"], check=True)
+
+    # 見出しは常に「中間発表」
+    headline = "中間発表"
+    body = (
+        f"🗳️エピソード投票{headline}（{month_day} {time_label}）🗳️\n"
+        f"\n{CAMPAIGN_PERIOD}\n"
+        f"投票はこちらから（1日1回）→ https://sugushinu-anime.jp/vote/\n\n"
+        f"#吸血鬼すぐ死ぬ\n#吸血鬼すぐ死ぬ２\n#応援上映エッヒョッヒョ"
+    )
+
+    # アンカーまで待機（FINAL_MODEは 18:00 固定）
+    if FINAL_MODE or RUN_LABEL in ("AM", "PM"):
+        wait_until(anchor, max_wait_seconds=15*60)
+
+    # IFTTTへ送信
+    key   = os.getenv("IFTTT_KEY")
+    event = os.getenv("IFTTT_EVENT")
+    if key and event:
+        url = f"https://maker.ifttt.com/trigger/{event}/with/key/{key}"
+        r = requests.post(url, json={"value1": body, "value2": img_url}, timeout=30)
+        print("IFTTT status:", r.status_code, r.text[:200])
+    else:
+        print("IFTTT_KEY/IFTTT_EVENT 未設定なので送信スキップ", file=sys.stderr)
+
+    print(f"IFTTT_TEXT::{body}")
+    print(f"IFTTT_IMG::{img_url}")
+
+    # 最終フラグ：以降のRunを無害化（FINAL_MODEのみ）
+    if FINAL_MODE:
+        FINAL_SENTINEL.write_text("done\n", encoding="utf-8")
+        subprocess.run(["git", "add", str(FINAL_SENTINEL)], check=True)
+        subprocess.run(["git", "commit", "-m", "Mark FINAL_DONE"], check=True)
+        subprocess.run(["git", "push"], check=True)
 
 if __name__ == "__main__":
     main()
