@@ -13,7 +13,7 @@ concurrency:
 
 env:
   TZ: Asia/Tokyo
-  TOP_N: "10"                                  # ← 今回は上位10位
+  TOP_N: "24"                                  # ← 今回は上位10位
   FINAL_MODE: "1"                              # ← 今日だけ18:00固定アンカー&投稿後停止
   FINAL_ANCHOR_JST: "2025-10-01T18:00:00+09:00"  # ← 18:00(JST)で投稿
 
